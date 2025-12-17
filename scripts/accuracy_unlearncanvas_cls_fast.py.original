@@ -12,13 +12,9 @@ from PIL import Image
 from tqdm import tqdm
 
 sys.path.append("")
-# Import both full and subsample versions
-from UnlearnCanvas_resources.const import class_available as class_available_full
-from UnlearnCanvas_resources.const import theme_available as theme_available_full
-from UnlearnCanvas_resources.const import class_available as class_available
-from UnlearnCanvas_resources.const import theme_available as theme_available
-# from UnlearnCanvas_resources.const import class_available_subsample as class_available
-# from UnlearnCanvas_resources.const import theme_available_subsample as theme_available
+# from UnlearnCanvas_resources.const import class_available, theme_available
+from UnlearnCanvas_resources.const import class_available_subsample as class_available
+from UnlearnCanvas_resources.const import theme_available_subsample as theme_available
 
 
 def main(
@@ -38,7 +34,7 @@ def main(
     # Create folder if not exist
     os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize both models with full architecture
+    # Initialize both models
     style_model = timm.create_model(
         "vit_large_patch16_224.augreg_in21k", pretrained=True
     ).to(device)
@@ -46,37 +42,15 @@ def main(
         "vit_large_patch16_224.augreg_in21k", pretrained=True
     ).to(device)
 
-    # First, set head to original full size to load checkpoint
-    style_model.head = torch.nn.Linear(1024, len(theme_available_full)).to(device)
-    class_model.head = torch.nn.Linear(1024, len(class_available_full)).to(device)
+    style_model.head = torch.nn.Linear(1024, len(theme_available)).to(device)
+    class_model.head = torch.nn.Linear(1024, len(class_available)).to(device)
 
-    # Load checkpoints with full size
-    style_checkpoint = torch.load(style_ckpt, map_location=device, weights_only=False)
-    class_checkpoint = torch.load(class_ckpt, map_location=device, weights_only=False)
-    
-    style_model.load_state_dict(style_checkpoint["model_state_dict"])
-    class_model.load_state_dict(class_checkpoint["model_state_dict"])
-
-    # Now extract only the weights for subsampled themes/classes
-    # Get indices of subsampled items in the full lists
-    theme_indices = [theme_available_full.index(t) for t in theme_available]
-    class_indices = [class_available_full.index(c) for c in class_available]
-
-    # Create new heads with subsampled size
-    new_style_head = torch.nn.Linear(1024, len(theme_available)).to(device)
-    new_class_head = torch.nn.Linear(1024, len(class_available)).to(device)
-
-    # Extract subsampled weights and biases
-    with torch.no_grad():
-        new_style_head.weight.data = style_model.head.weight.data[theme_indices, :]
-        new_style_head.bias.data = style_model.head.bias.data[theme_indices]
-        
-        new_class_head.weight.data = class_model.head.weight.data[class_indices, :]
-        new_class_head.bias.data = class_model.head.bias.data[class_indices]
-
-    # Replace heads with subsampled versions
-    style_model.head = new_style_head
-    class_model.head = new_class_head
+    style_model.load_state_dict(
+        torch.load(style_ckpt, map_location=device)["model_state_dict"]
+    )
+    class_model.load_state_dict(
+        torch.load(class_ckpt, map_location=device)["model_state_dict"]
+    )
 
     style_model.eval()
     class_model.eval()
@@ -192,15 +166,22 @@ def main(
                 style_results["pred_loss"][test_theme] += style_softmax[i][
                     batch_style_labels[i]
                 ].item()
+                # Start fix (Riccardo: this should be ok, but I'm doing it my way)
+                # style_results["acc"][test_theme] += (
+                #     style_pred_success[i].item()
+                #     * 1.0
+                #     / (len(classes_to_use) * len(seed))
+                # )
                 style_results["acc"][test_theme] += style_pred_success[i].item()
+                # End fix (Riccardo)
                 misclassified_as = theme_available[style_pred_labels[i].item()]
                 style_results["misclassified"][test_theme][misclassified_as] += 1
-    
-    # Normalize accuracy by total samples per theme
+    # Start fix (Riccardo)
     for theme in theme_available:
         total_samples_for_theme = sum(style_results["misclassified"][theme].values())
         if total_samples_for_theme > 0:
             style_results["acc"][theme] = (style_results["acc"][theme] / total_samples_for_theme)
+    # End fix (Riccardo)
 
     if not dry_run:
         style_output_path = os.path.join(output_dir, f"{cls}.pth")
@@ -225,16 +206,24 @@ def main(
                 class_results["pred_loss"][object_class] += class_softmax[i][
                     batch_class_labels[i]
                 ].item()
+                # Start fix (Riccardo)
+                # class_results["acc"][object_class] += (
+                #     class_pred_success[i].item()
+                #     * 1.0
+                #     / (
+                #         (len(theme_available) - 1) * len(seed) * 2
+                #     )  # exclude Seed_Images
+                # )
                 class_results["acc"][object_class] += class_pred_success[i].item()
+                # End fix (Riccardo)
                 misclassified_as = class_available[class_pred_labels[i].item()]
                 class_results["misclassified"][object_class][misclassified_as] += 1
-    
-    # Normalize accuracy by total samples per class
+    # Start fix (Riccardo)
     for object_class in class_available:
         total_samples_for_class = sum(class_results["misclassified"][object_class].values())
         if total_samples_for_class > 0:
             class_results["acc"][object_class] = class_results["acc"][object_class] / total_samples_for_class
-    
+    # End fix (Riccardo)
     if not dry_run:
         class_output_path = os.path.join(output_dir, f"{cls}_cls.pth")
         torch.save(class_results, class_output_path)

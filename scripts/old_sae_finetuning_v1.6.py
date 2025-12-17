@@ -96,34 +96,44 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
                 # Create samples with proper style labels using recovered metadata
                 style_datasets = []
                 total_recovered_samples = 0
-                
+                current_idx = 0  # Track position in dataset
+
                 for style_name, style_entries in object_style_index[concept_name].items():
                     for entry in style_entries:
-                        start_idx, end_idx = entry["sample_range"]
                         sample_count = entry["sample_count"]
+
+                        # Calculate the range based on current position
+                        start_idx = current_idx
+                        end_idx = current_idx + sample_count
+
                         confidence = entry.get("recovery_confidence", "unknown")
-                        
+
                         print(f"      {style_name}: samples {start_idx}-{end_idx-1} ({sample_count} samples, confidence: {confidence})")
-                        
+
                         # Extract samples for this style
                         try:
                             style_samples = dataset.select(range(start_idx, end_idx))
-                            
+
                             # Remove existing labels and add correct ones
                             if "object_label" in style_samples.column_names:
                                 style_samples = style_samples.remove_columns(["object_label"])
                             if "style_label" in style_samples.column_names:
                                 style_samples = style_samples.remove_columns(["style_label"])
-                            
+
                             # Add correct labels
                             style_samples = style_samples.add_column("object_label", [concept_name] * len(style_samples))
                             style_samples = style_samples.add_column("style_label", [style_name] * len(style_samples))
-                            
+
                             style_datasets.append(style_samples)
                             total_recovered_samples += len(style_samples)
-                            
+
+                            # Update current index for next style
+                            current_idx = end_idx
+
                         except Exception as e:
                             print(f"        ❌ Error extracting {style_name} samples: {e}")
+                            # Still update index to skip these samples
+                            current_idx = end_idx
                             continue
                 
                 if style_datasets:
@@ -482,10 +492,22 @@ class SAEConceptLatentOptimizer:
 
         def dual_label_collate_fn(batch):
             """Collate function that handles both object and style labels."""
-            activations = torch.stack([item['activations'] for item in batch])
+            # Convert activations to tensors if they're lists
+            activations_list = []
+            for item in batch:
+                act = item['activations']
+                if isinstance(act, list):
+                    # If it's a list, convert to tensor
+                    act = torch.tensor(act) if not isinstance(act[0], torch.Tensor) else torch.stack(act)
+                elif not isinstance(act, torch.Tensor):
+                    # If it's neither a list nor a tensor, try to convert
+                    act = torch.tensor(act)
+                activations_list.append(act)
+
+            activations = torch.stack(activations_list)
             object_labels = [item['object_label'] for item in batch]
             style_labels = [item['style_label'] for item in batch]
-            
+
             return activations, object_labels, style_labels
 
         # Handle distributed training properly
@@ -542,25 +564,39 @@ class SAEConceptLatentOptimizer:
         sae = self.saes[hook_name]
         model = sae.module if hasattr(sae, 'module') else sae
         model_num_latents = model.num_latents
-
-        # Get unique objects and styles from your data
-        sample_batch = next(iter(self.train_loader))
-        _, object_labels, style_labels = sample_batch
-        unique_objects = set(object_labels)
-        unique_styles = set([s for s in style_labels if s != "none"])
-
+    
+        # Read ALL objects and styles from the metadata file
+        # Don't rely on a single batch sample which may miss most styles
+        hookpoint_names = list(self.saes.keys())
+        hookpoint = hookpoint_names[0]  # Get the hookpoint name
+        
+        metadata_path = self.activations_dir / hookpoint / "metadata" / "recovered_object_to_style_index.json"
+        
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        # Get all unique objects
+        unique_objects = set(metadata.keys())
+        
+        # Get all unique styles across all objects
+        unique_styles = set()
+        for obj_styles in metadata.values():
+            unique_styles.update(obj_styles.keys())
+        
+        unique_styles.discard('none')  # Remove 'none'
+    
         print(f"Random assignment for {len(unique_objects)} objects and {len(unique_styles)} styles")
         print(f"Available latents: {model_num_latents}")
-
+    
         # Create random assignments
         import random
         available_latents = list(range(model_num_latents))
         random.shuffle(available_latents)
-
+    
         object_to_latent = {}
         style_to_latent = {}
         latent_idx = 0
-
+    
         # Assign objects first (priority)
         for obj in sorted(unique_objects):
             if latent_idx < len(available_latents):
@@ -573,7 +609,7 @@ class SAEConceptLatentOptimizer:
                 assigned_latent = random.randint(0, model_num_latents - 1)
                 object_to_latent[obj] = assigned_latent
                 print(f"  Random object '{obj}' → latent {assigned_latent} (conflict possible)")
-
+    
         # Assign styles
         for style in sorted(unique_styles):
             if latent_idx < len(available_latents):
@@ -586,12 +622,12 @@ class SAEConceptLatentOptimizer:
                 assigned_latent = random.randint(0, model_num_latents - 1)
                 style_to_latent[style] = assigned_latent
                 print(f"  Random style '{style}' → latent {assigned_latent} (conflict possible)")
-
+    
         print(f"\nRandom assignment completed:")
         print(f"  Objects: {len(object_to_latent)} assigned")
         print(f"  Styles: {len(style_to_latent)} assigned")
         print(f"  Latents used: {latent_idx}/{model_num_latents}")
-
+    
         return object_to_latent, style_to_latent
 
     def _assign_concepts_from_scores(self, hook_name):
@@ -1073,9 +1109,11 @@ class SAEConceptLatentOptimizer:
             # Default SAE configuration
             cfg = {
                 "expansion_factor": 16,
+                # "expansion_factor": 4, # For SDXL-turbo
                 "normalize_decoder": True,
                 "num_latents": 0,  # Will be calculated from d_in * expansion_factor
                 "k": 32,
+                # "k": 160, # For SDXL-turbo
                 "batch_topk": False,
                 "sample_topk": False,
                 "input_unit_norm": False,

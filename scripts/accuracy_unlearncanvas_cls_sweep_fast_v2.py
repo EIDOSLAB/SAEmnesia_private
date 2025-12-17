@@ -21,7 +21,7 @@ def main(
     output_dir,
     class_ckpt,
     cls=None,
-    seed=[188], # [42, 188, 288, 588, 688, 888],
+    seed=[42], # [188, 288, 588, 688, 888],
     dry_run=False,
     limit_classes=-1,
     batch_size=32,
@@ -56,6 +56,10 @@ def main(
             class_: {other_class: 0 for other_class in class_available}
             for class_ in class_available
         },
+        # NEW: Add confidence metrics
+        "max_confidence": {class_: 0.0 for class_ in class_available},  # Sum of max confidences
+        "entropy": {class_: 0.0 for class_ in class_available},  # Sum of prediction entropies
+        "top2_gap": {class_: 0.0 for class_ in class_available},  # Gap between top 2 predictions
     }
 
     image_transform = transforms.Compose(
@@ -111,31 +115,45 @@ def main(
             class_pred_labels = torch.argmax(class_res, dim=1)
             class_pred_success = class_pred_labels == batch_class_labels
 
+            # NEW: Calculate confidence metrics
+            # Get max confidence (highest softmax probability)
+            max_confidences = torch.max(class_softmax, dim=1)[0]
+            
+            # Calculate entropy: -sum(p * log(p))
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-10
+            entropies = -torch.sum(class_softmax * torch.log(class_softmax + epsilon), dim=1)
+            
+            # Calculate gap between top 2 predictions
+            top2_values = torch.topk(class_softmax, k=2, dim=1)[0]
+            top2_gaps = top2_values[:, 0] - top2_values[:, 1]
+
             for i in range(len(batch_class_labels)):
                 object_class = class_available[batch_class_labels[i].item()]
                 class_results["loss"][object_class] += class_loss[i].item()
                 class_results["pred_loss"][object_class] += class_softmax[i][
                     batch_class_labels[i]
                 ].item()
-                # Start fix (Riccardo: I don't think dividing by classes_to_use 
-                # is correct here, it should be divided by the number of used themes 
-                # (limit-theme option), or as in my solution)
-                # class_results["acc"][object_class] += (
-                #     class_pred_success[i].item()
-                #     * 1.0
-                #     / (len(classes_to_use) * len(seed)) 
-                # )
                 class_results["acc"][object_class] += class_pred_success[i].item()
-                # End fix (Riccardo)
+                
+                # NEW: Accumulate confidence metrics
+                class_results["max_confidence"][object_class] += max_confidences[i].item()
+                class_results["entropy"][object_class] += entropies[i].item()
+                class_results["top2_gap"][object_class] += top2_gaps[i].item()
+                
                 misclassified_as = class_available[class_pred_labels[i].item()]
                 class_results["misclassified"][object_class][misclassified_as] += 1
-    # Start fix (Riccardo)
+    
+    # Normalize metrics by number of samples
     for object_class in class_available:
         total_samples_for_class = sum(class_results["misclassified"][object_class].values())
         
         if total_samples_for_class > 0:
             class_results["acc"][object_class] = class_results["acc"][object_class] / total_samples_for_class
-    # End fix (Riccardo)
+            # NEW: Normalize confidence metrics
+            class_results["max_confidence"][object_class] /= total_samples_for_class
+            class_results["entropy"][object_class] /= total_samples_for_class
+            class_results["top2_gap"][object_class] /= total_samples_for_class
 
     if not dry_run:
         class_output_path = os.path.join(output_dir, f"{cls}_cls.pth")

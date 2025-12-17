@@ -6,6 +6,7 @@ For object classes instead of styles.
 
 import os
 import sys
+import json
 
 import fire
 import torch
@@ -14,7 +15,7 @@ from diffusers.utils.import_utils import is_xformers_available
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 
-from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline
+from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline, HookedStableDiffusionXLPipeline
 from SAE.sae import Sae
 from UnlearnCanvas_resources.const import class_available
 
@@ -69,11 +70,29 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
     sae.cfg.batch_topk = False
     sae.cfg.sample_topk = False
 
-    pipe = HookedStableDiffusionPipeline.from_pretrained(
+    # Detect model type from model_index.json
+    model_index_path = os.path.join(pipe_path, "model_index.json")
+    is_sdxl = False
+    
+    if os.path.exists(model_index_path):
+        with open(model_index_path, 'r') as f:
+            model_index = json.load(f)
+        # SDXL has text_encoder_2, SD1.5 doesn't
+        is_sdxl = "text_encoder_2" in model_index
+        
+    if is_sdxl:
+        print("🎯 Detected SDXL model - using HookedStableDiffusionXLPipeline")
+        PipelineClass = HookedStableDiffusionXLPipeline
+    else:
+        print("🎯 Detected SD1.5 model - using HookedStableDiffusionPipeline")
+        PipelineClass = HookedStableDiffusionPipeline
+
+    pipe = PipelineClass.from_pretrained(
         pipe_path,
         torch_dtype=torch.float16,
         safety_checker=None,
     ).to("cuda")
+    
     if is_xformers_available():
         print("Enabling xFormers memory efficient attention")
         pipe.unet.enable_xformers_memory_efficient_attention()

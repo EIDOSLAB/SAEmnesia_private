@@ -262,6 +262,7 @@ def main(
                         steps=steps,
                         preserve_error=True,
                         start_timestep=start_timestep,
+                        use_beta=True
                     )
                 else:
                     steering_hooks = {}

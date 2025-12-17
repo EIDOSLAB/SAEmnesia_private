@@ -44,6 +44,78 @@ from datasets import Dataset as HFDataset, concatenate_datasets, load_from_disk
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+PREDEFINED_ASSIGNMENTS = {
+    "objects": {
+        "Architectures": 9613,
+        "Bears": 10592,
+        "Birds": 17841,
+        "Butterfly": 6813,
+        "Cats": 1182,
+        "Dogs": 20120,
+        "Fishes": 11931,
+        "Flame": 1596,
+        "Flowers": 11979,
+        "Frogs": 3421,
+        "Horses": 14309,
+        "Human": 14467,
+        "Jellyfish": 8318,
+        "Rabbits": 14130,
+        "Sandwiches": 16100,
+        "Sea": 1993,
+        "Statues": 17024,
+        "Towers": 5081,
+        "Trees": 8314,
+        "Waterfalls": 1227,
+    },
+    "styles": {
+        "Abstractionism": 1831,
+        "Artist Sketch": 19398,
+        "Blossom Season": 253,
+        "Bricks": 12120,
+        "Byzantine": 4346,
+        "Cartoon": 14550,
+        "Cold Warm": 17645,
+        "Color Fantasy": 16398,
+        "Comic Etch": 1088,
+        "Cubism": 8432,
+        "Dadaism": 18266,
+        "Dapple": 15474,
+        "Defoliation": 18513,
+        "Early Autumn": 7970,
+        "Expressionism": 7735,
+        "Fauvism": 17925,
+        "French": 3254,
+        "Glowing Sunset": 7284,
+        "Gorgeous Love": 13047,
+        "Greenfield": 12471,
+        "Impressionism": 16421,
+        "Joy": 14652,
+        "Magic Cube": 2298,
+        "Meta Physics": 11513,
+        "Monet": 2366,
+        "Mosaic": 15939,
+        "Neon Lines": 17157,
+        "On Fire": 19356,
+        "Pastel": 5867,
+        "Pencil Drawing": 8292,
+        "Picasso": 11745,
+        "Pop Art": 13272,
+        "Red Blue Ink": 14218,
+        "Rust": 16182,
+        "Sketch": 11114,
+        "Sponge Dabbed": 20025,
+        "Structuralism": 13468,
+        "Superstring": 4568,
+        "Surrealism": 2171,
+        "Ukiyoe": 11461,
+        "Van Gogh": 6926,
+        "Vibrant Flow": 6170,
+        "Warm Love": 1110,
+        "Warm Smear": 17326,
+        "Watercolor": 18455,
+    }
+}
+
 def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=torch.float32):
     """
     Load datasets from concept directories with recovered style information.
@@ -76,6 +148,13 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
         for concept_dir in concept_subdirs:
             concept_name = concept_dir.name
             
+            # Skip directories that look like two-object combinations
+            if '_' in concept_name and concept_name not in object_style_index:
+                parts = concept_name.split('_')
+                if len(parts) == 2:
+                    print(f"  Skipping potential two-object dir: {concept_name}")
+                    continue
+            
             if (concept_dir / "dataset_info.json").exists():
                 print(f"  Loading concept '{concept_name}' with style recovery...")
                 
@@ -87,8 +166,12 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
                 if concept_name not in object_style_index:
                     print(f"    ⚠️  No style recovery data for '{concept_name}', using 'none' style")
                     # Fallback: assign all to 'none' style
-                    dataset = dataset.remove_columns(["object_label", "style_label"] if "object_label" in dataset.column_names else ["style_label"] if "style_label" in dataset.column_names else [])
+                    cols_to_remove = [c for c in ["object_label", "object_label_2", "style_label"] 
+                                     if c in dataset.column_names]
+                    if cols_to_remove:
+                        dataset = dataset.remove_columns(cols_to_remove)
                     dataset = dataset.add_column("object_label", [concept_name] * len(dataset))
+                    dataset = dataset.add_column("object_label_2", [None] * len(dataset))
                     dataset = dataset.add_column("style_label", ["none"] * len(dataset))
                     datasets.append(dataset)
                     continue
@@ -96,34 +179,45 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
                 # Create samples with proper style labels using recovered metadata
                 style_datasets = []
                 total_recovered_samples = 0
-                
+                current_idx = 0  # Track position in dataset
+
                 for style_name, style_entries in object_style_index[concept_name].items():
                     for entry in style_entries:
-                        start_idx, end_idx = entry["sample_range"]
                         sample_count = entry["sample_count"]
+
+                        # Calculate the range based on current position
+                        start_idx = current_idx
+                        end_idx = current_idx + sample_count
+
                         confidence = entry.get("recovery_confidence", "unknown")
-                        
+
                         print(f"      {style_name}: samples {start_idx}-{end_idx-1} ({sample_count} samples, confidence: {confidence})")
-                        
+
                         # Extract samples for this style
                         try:
                             style_samples = dataset.select(range(start_idx, end_idx))
-                            
+
                             # Remove existing labels and add correct ones
-                            if "object_label" in style_samples.column_names:
-                                style_samples = style_samples.remove_columns(["object_label"])
-                            if "style_label" in style_samples.column_names:
-                                style_samples = style_samples.remove_columns(["style_label"])
-                            
+                            cols_to_remove = [c for c in ["object_label", "object_label_2", "style_label"] 
+                                             if c in style_samples.column_names]
+                            if cols_to_remove:
+                                style_samples = style_samples.remove_columns(cols_to_remove)
+
                             # Add correct labels
                             style_samples = style_samples.add_column("object_label", [concept_name] * len(style_samples))
+                            style_samples = style_samples.add_column("object_label_2", [None] * len(style_samples))
                             style_samples = style_samples.add_column("style_label", [style_name] * len(style_samples))
-                            
+
                             style_datasets.append(style_samples)
                             total_recovered_samples += len(style_samples)
-                            
+
+                            # Update current index for next style
+                            current_idx = end_idx
+
                         except Exception as e:
                             print(f"        ❌ Error extracting {style_name} samples: {e}")
+                            # Still update index to skip these samples
+                            current_idx = end_idx
                             continue
                 
                 if style_datasets:
@@ -132,9 +226,13 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
                     print(f"    ✅ Combined dataset: {len(combined_dataset)} samples ({total_recovered_samples} recovered)")
                     
                     # Set format
+                    format_cols = ["activations", "object_label", "object_label_2", "style_label"]
+                    if "timestep" in combined_dataset.column_names:
+                        format_cols.append("timestep")
+                    
                     combined_dataset.set_format(
                         type="torch",
-                        columns=["activations", "timestep", "object_label", "style_label"],
+                        columns=format_cols,
                         dtype=dtype,
                     )
                     
@@ -146,15 +244,151 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
         raise ValueError(f"No valid datasets found for hookpoint {hookpoint}")
 
     final_dataset = concatenate_datasets(datasets)
-    print(f"\n✅ Final combined dataset: {len(final_dataset)} samples")
+    print(f"\n✅ Final single-object+style dataset: {len(final_dataset)} samples")
     
     # Print style distribution summary
-    unique_objects = set(final_dataset["object_label"])
-    unique_styles = set(final_dataset["style_label"])
-    print(f"   Objects: {len(unique_objects)} ({list(unique_objects)[:5]}...)")
-    print(f"   Styles: {len(unique_styles)} ({list(unique_styles)[:5]}...)")
+    unique_objects = set()
+    unique_styles = set()
+    for i in range(min(1000, len(final_dataset))):
+        unique_objects.add(final_dataset[i]["object_label"])
+        style = final_dataset[i].get("style_label")
+        if style and style != "none":
+            unique_styles.add(style)
+    
+    print(f"   Objects: {len(unique_objects)}")
+    print(f"   Styles: {len(unique_styles)}")
     
     return final_dataset
+
+def load_two_object_datasets(base_dirs, hookpoint, dtype=torch.float32):
+    """
+    Load datasets containing two-object combinations for removal training.
+    """
+    datasets = []
+    print(f"\nLoading two-object datasets from {base_dirs} for hookpoint {hookpoint}")
+    
+    for base_dir in base_dirs:
+        base_path = Path(base_dir)
+        
+        # Look for two-object datasets
+        possible_paths = [
+            base_path / hookpoint / "two_objects",
+            base_path / "two_objects" / hookpoint,
+            base_path / hookpoint,
+        ]
+        
+        for hookpoint_dir in possible_paths:
+            if not hookpoint_dir.exists():
+                continue
+            
+            print(f"  Checking path: {hookpoint_dir}")
+                
+            # FIXED: Look for the correct metadata filename
+            metadata_path = hookpoint_dir / "metadata" / "object1_to_object2_index.json"
+            
+            if not metadata_path.exists():
+                print(f"  ⚠️ No metadata found at {metadata_path}")
+                continue
+            
+            with open(metadata_path, 'r') as f:
+                object1_to_object2_index = json.load(f)
+            print(f"✅ Loaded two-object metadata from {metadata_path}")
+            print(f"   Found {len(object1_to_object2_index)} first-objects in index")
+            
+            # Track which dataset paths we've already loaded to avoid duplicates
+            loaded_paths = set()
+            
+            # Iterate through the metadata to load datasets
+            for object_1, object_2_dict in object1_to_object2_index.items():
+                for object_2, entries in object_2_dict.items():
+                    for entry in entries:
+                        dataset_path = entry.get("dataset_path")
+                        sample_count = entry.get("sample_count", 0)
+                        
+                        # Skip if we've already loaded this dataset
+                        if dataset_path in loaded_paths:
+                            continue
+                        
+                        if not dataset_path or not Path(dataset_path).exists():
+                            print(f"  ⚠️ Dataset path not found: {dataset_path}")
+                            continue
+                        
+                        try:
+                            dataset = HFDataset.load_from_disk(dataset_path, keep_in_memory=False)
+                            loaded_paths.add(dataset_path)
+                            
+                            # The dataset should already have object_label and object_label_2 columns
+                            if "object_label" not in dataset.column_names or "object_label_2" not in dataset.column_names:
+                                print(f"  ⚠️ Missing label columns in {dataset_path}")
+                                continue
+                            
+                            # Add style_label if missing
+                            if "style_label" not in dataset.column_names:
+                                dataset = dataset.add_column("style_label", ["none"] * len(dataset))
+                            
+                            # Set format
+                            format_cols = ["activations", "object_label", "object_label_2", "style_label"]
+                            if "timestep" in dataset.column_names:
+                                format_cols.append("timestep")
+                            
+                            dataset.set_format(
+                                type="torch",
+                                columns=format_cols,
+                                dtype=dtype,
+                            )
+                            
+                            datasets.append(dataset)
+                            print(f"  ✅ Loaded: {Path(dataset_path).name} ({len(dataset)} samples)")
+                            
+                        except Exception as e:
+                            print(f"  ❌ Error loading {dataset_path}: {e}")
+            
+            # Break after finding valid metadata in one of the possible paths
+            if datasets:
+                break
+    
+    if not datasets:
+        print("  ⚠️ No two-object datasets found!")
+        return None
+        
+    combined = concatenate_datasets(datasets)
+    print(f"\n✅ Combined two-object dataset: {len(combined)} samples")
+    return combined
+
+
+def load_combined_datasets(single_obj_dirs, two_obj_dirs, hookpoint, dtype=torch.float32):
+    """
+    Load and combine both single-object+style and two-object datasets.
+    """
+    print("\\n" + "="*60)
+    print("Loading Combined Datasets")
+    print("="*60)
+    
+    # Load single-object+style
+    single_dataset = load_datasets_from_category_dirs_with_styles(single_obj_dirs, hookpoint, dtype)
+    
+    # Ensure object_label_2 column exists for single-object dataset
+    if single_dataset is not None and "object_label_2" not in single_dataset.column_names:
+        single_dataset = single_dataset.add_column("object_label_2", [None] * len(single_dataset))
+    
+    # Load two-object
+    two_obj_dataset = load_two_object_datasets(two_obj_dirs, hookpoint, dtype)
+    
+    datasets_to_combine = []
+    if single_dataset is not None:
+        datasets_to_combine.append(single_dataset)
+        print(f"Single-object samples: {len(single_dataset)}")
+    if two_obj_dataset is not None:
+        datasets_to_combine.append(two_obj_dataset)
+        print(f"Two-object samples: {len(two_obj_dataset)}")
+    
+    if not datasets_to_combine:
+        raise ValueError("No datasets found!")
+    
+    combined = concatenate_datasets(datasets_to_combine)
+    print(f"Total combined: {len(combined)}")
+    
+    return combined
 
 class SAEConceptLatentOptimizer:
     """
@@ -190,7 +424,11 @@ class SAEConceptLatentOptimizer:
         activation_column="activations",
         patience=5,
         resume=False,
-        from_scratch=False
+        from_scratch=False,
+        enable_removal_training=False,
+        removal_weight=1.0,              
+        two_object_activations_dir=None,
+        single_object_ratio=0.5,
     ):
         self.checkpoint_path = Path(checkpoint_path)
         self.activations_dir = Path(activations_dir)
@@ -217,6 +455,12 @@ class SAEConceptLatentOptimizer:
         self.patience = patience
         self.resume = resume
         self.from_scratch = from_scratch
+        self.two_object_activations_dir = Path(two_object_activations_dir) if two_object_activations_dir else self.activations_dir
+        self.single_object_ratio = single_object_ratio
+
+        self.enable_removal_training = enable_removal_training
+        self.removal_weight = removal_weight
+        self.target_activation_cache = None
 
         # Early stopping variables
         self.best_val_loss = float('inf')
@@ -388,6 +632,74 @@ class SAEConceptLatentOptimizer:
 
         return None, None
 
+    
+    def build_single_object_activation_cache(self):
+        """
+        Build a cache mapping object concepts to dataset indices.
+        MEMORY-OPTIMIZED: Stores indices instead of tensors.
+        """
+        print("\nBuilding single-object activation cache (index-based)...")
+    
+        target_cache = {}
+    
+        for idx in range(len(self.train_dataset)):
+            sample = self.train_dataset[idx]
+            object_label = sample['object_label']
+            
+            obj_2 = sample.get('object_label_2')
+            if obj_2 is not None and obj_2 != 'none' and str(obj_2) != 'None':
+                continue
+            
+            if object_label not in target_cache:
+                target_cache[object_label] = []
+    
+            # Store INDEX instead of activation tensor
+            target_cache[object_label].append(idx)
+    
+        print(f"✅ Cached indices for {len(target_cache)} objects")
+        total_indices = sum(len(indices) for indices in target_cache.values())
+        print(f"   Total cached indices: {total_indices}")
+        
+        return target_cache
+    
+    
+    def get_target_activation_for_removal(self, object_to_keep, batch_size=1):
+        """
+        Get target activation(s) for removal training.
+        MEMORY-OPTIMIZED: Fetches from dataset on-demand.
+        """
+        if object_to_keep not in self.target_activation_cache:
+            return None
+    
+        available_indices = self.target_activation_cache[object_to_keep]
+    
+        if len(available_indices) == 0:
+            return None
+    
+        # Randomly sample indices
+        sampled_targets = []
+        for _ in range(batch_size):
+            # Pick a random index from the cached indices
+            random_idx = torch.randint(0, len(available_indices), (1,)).item()
+            dataset_idx = available_indices[random_idx]
+            
+            # Fetch activation from dataset ON-DEMAND
+            sample = self.train_dataset[dataset_idx]
+            activation = sample['activations']
+            
+            # Convert to tensor if needed
+            if not isinstance(activation, torch.Tensor):
+                activation = torch.tensor(activation)
+            
+            # Handle 3D activations [seq, features] -> average to [features]
+            if len(activation.shape) == 2:
+                activation = activation.mean(dim=0)
+                
+            sampled_targets.append(activation)
+    
+        target_batch = torch.stack(sampled_targets)
+        return target_batch.to(self.device, dtype=self.dtype)
+
     def load_scores_data(self):
         """Load both object and style scores from separate JSON files."""
         print(f"Loading object scores from {self.object_scores_json_path}")
@@ -421,40 +733,47 @@ class SAEConceptLatentOptimizer:
             print(f"  Concept type: {self.style_scores_data.get('concept_type', 'unknown')}")
             print(f"  Number of concepts: {len(self.style_scores_data.get('scores', {}))}")
 
+    
     def initialize_datasets_with_styles(self):
-        """Dataset initialization with recovered style information."""
-        print("Initializing datasets with recovered style information...")
+        """Dataset initialization with both single-object+style AND two-object data."""
+        print("Initializing dual datasets (single-object+style AND two-object)...")
 
         hookpoint_names = list(self.saes.keys())
 
         dataset_dict = {}
         if not self.world_size > 1 or self.rank == 0:
             for hookpoint in hookpoint_names:
-                # Use the function with style recovery
-                dataset = load_datasets_from_category_dirs_with_styles(
-                    [str(self.activations_dir)], 
+                # Load combined datasets
+                single_obj_dirs = [str(self.activations_dir)]
+                two_obj_dirs = [str(self.two_object_activations_dir)]
+                
+                dataset = load_combined_datasets(
+                    single_obj_dirs, 
+                    two_obj_dirs, 
                     hookpoint, 
                     self.dtype
                 )
 
-                # Apply numpy shuffling
-                print(f"Applying numpy-based shuffling to {len(dataset)} samples...")
+                # Shuffle
+                print(f"Shuffling {len(dataset)} samples...")
                 indices = np.arange(len(dataset))
                 np.random.seed(self.seed)
                 np.random.shuffle(indices)
                 dataset = dataset.select(indices)
-                print(f"✅ Applied numpy shuffling for {len(dataset)} samples")
 
                 dataset_dict[hookpoint] = dataset
-                print(f"Completed loading for {hookpoint}: {len(dataset)} samples")
 
-        # DDP synchronization
+        # DDP synchronization (same as before)
         if self.world_size > 1:
             dist.barrier()
             if self.rank != 0:
                 for hookpoint in hookpoint_names:
-                    dataset = load_datasets_from_category_dirs_with_styles(
-                        [str(self.activations_dir)], 
+                    single_obj_dirs = [str(self.activations_dir)]
+                    two_obj_dirs = [str(self.two_object_activations_dir)]
+                    
+                    dataset = load_combined_datasets(
+                        single_obj_dirs, 
+                        two_obj_dirs, 
                         hookpoint, 
                         self.dtype
                     )
@@ -465,9 +784,8 @@ class SAEConceptLatentOptimizer:
                     dataset = dataset.shard(self.world_size, self.rank)
                     dataset_dict[hookpoint] = dataset
 
-        # Create data loaders with dual labels
         self._create_dual_data_loaders(dataset_dict)
-        print("\n✅ Dataset initialization with styles completed!")
+        print("\\n✅ Dual dataset initialization completed!")
 
     def _create_dual_data_loaders(self, dataset_dict):
         """DataLoader creation with both object and style labels."""
@@ -477,16 +795,56 @@ class SAEConceptLatentOptimizer:
         val_size = int(total_size * self.validation_split)
         train_size = total_size - val_size
 
+        if self.world_size > 1:
+            # Each process only keeps its shard
+            dataset = dataset.shard(num_shards=self.world_size, index=self.rank)
+            total_size = len(dataset)
+            val_size = int(total_size * self.validation_split)
+            train_size = total_size - val_size
+
         train_dataset = dataset.select(range(train_size))
         val_dataset = dataset.select(range(train_size, total_size))
 
         def dual_label_collate_fn(batch):
-            """Collate function that handles both object and style labels."""
-            activations = torch.stack([item['activations'] for item in batch])
-            object_labels = [item['object_label'] for item in batch]
-            style_labels = [item['style_label'] for item in batch]
-            
-            return activations, object_labels, style_labels
+            """Collate function that handles both object and style labels, plus two-object samples."""
+            activations_list = []
+            object_labels_1 = []
+            object_labels_2 = []  # Will be None for single-object samples
+            style_labels = []
+            sample_types = []
+
+            for item in batch:
+                # Convert activations
+                act = item['activations']
+                if isinstance(act, list):
+                    act = torch.tensor(act) if not isinstance(act[0], torch.Tensor) else torch.stack(act)
+                elif not isinstance(act, torch.Tensor):
+                    act = torch.tensor(act)
+                activations_list.append(act)
+
+                # Check if this is a two-object sample
+                if 'object_label_2' in item and item['object_label_2'] is not None and item['object_label_2'] != 'none':
+                    # Two-object sample
+                    sample_types.append('two_objects')
+                    object_labels_1.append(item['object_label'])
+                    object_labels_2.append(item['object_label_2'])
+                    style_labels.append(None)
+                else:
+                    # Single-object sample
+                    sample_types.append('single_object')
+                    object_labels_1.append(item['object_label'])
+                    object_labels_2.append(None)
+                    style_labels.append(item.get('style_label', 'none'))
+
+            activations = torch.stack(activations_list)
+
+            return {
+                'activations': activations,
+                'object_labels_1': object_labels_1,
+                'object_labels_2': object_labels_2,
+                'style_labels': style_labels,
+                'sample_types': sample_types
+            }
 
         # Handle distributed training properly
         if self.world_size > 1:
@@ -502,12 +860,12 @@ class SAEConceptLatentOptimizer:
 
         self.train_loader = DataLoader(
             train_dataset, batch_size=self.batch_size, shuffle=train_shuffle, sampler=train_sampler,
-            num_workers=2, pin_memory=True, collate_fn=dual_label_collate_fn
+            num_workers=0, pin_memory=True, collate_fn=dual_label_collate_fn
         )
 
         self.val_loader = DataLoader(
             val_dataset, batch_size=self.batch_size, shuffle=val_shuffle, sampler=val_sampler,
-            num_workers=2, pin_memory=True, collate_fn=dual_label_collate_fn
+            num_workers=0, pin_memory=True, collate_fn=dual_label_collate_fn
         )
 
         self.train_dataset = train_dataset
@@ -542,25 +900,39 @@ class SAEConceptLatentOptimizer:
         sae = self.saes[hook_name]
         model = sae.module if hasattr(sae, 'module') else sae
         model_num_latents = model.num_latents
-
-        # Get unique objects and styles from your data
-        sample_batch = next(iter(self.train_loader))
-        _, object_labels, style_labels = sample_batch
-        unique_objects = set(object_labels)
-        unique_styles = set([s for s in style_labels if s != "none"])
-
+    
+        # Read ALL objects and styles from the metadata file
+        # Don't rely on a single batch sample which may miss most styles
+        hookpoint_names = list(self.saes.keys())
+        hookpoint = hookpoint_names[0]  # Get the hookpoint name
+        
+        metadata_path = self.activations_dir / hookpoint / "metadata" / "recovered_object_to_style_index.json"
+        
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        # Get all unique objects
+        unique_objects = set(metadata.keys())
+        
+        # Get all unique styles across all objects
+        unique_styles = set()
+        for obj_styles in metadata.values():
+            unique_styles.update(obj_styles.keys())
+        
+        unique_styles.discard('none')  # Remove 'none'
+    
         print(f"Random assignment for {len(unique_objects)} objects and {len(unique_styles)} styles")
         print(f"Available latents: {model_num_latents}")
-
+    
         # Create random assignments
         import random
         available_latents = list(range(model_num_latents))
         random.shuffle(available_latents)
-
+    
         object_to_latent = {}
         style_to_latent = {}
         latent_idx = 0
-
+    
         # Assign objects first (priority)
         for obj in sorted(unique_objects):
             if latent_idx < len(available_latents):
@@ -573,7 +945,7 @@ class SAEConceptLatentOptimizer:
                 assigned_latent = random.randint(0, model_num_latents - 1)
                 object_to_latent[obj] = assigned_latent
                 print(f"  Random object '{obj}' → latent {assigned_latent} (conflict possible)")
-
+    
         # Assign styles
         for style in sorted(unique_styles):
             if latent_idx < len(available_latents):
@@ -586,12 +958,12 @@ class SAEConceptLatentOptimizer:
                 assigned_latent = random.randint(0, model_num_latents - 1)
                 style_to_latent[style] = assigned_latent
                 print(f"  Random style '{style}' → latent {assigned_latent} (conflict possible)")
-
+    
         print(f"\nRandom assignment completed:")
         print(f"  Objects: {len(object_to_latent)} assigned")
         print(f"  Styles: {len(style_to_latent)} assigned")
         print(f"  Latents used: {latent_idx}/{model_num_latents}")
-
+    
         return object_to_latent, style_to_latent
 
     def _assign_concepts_from_scores(self, hook_name):
@@ -608,7 +980,8 @@ class SAEConceptLatentOptimizer:
 
         # Get unique objects and styles from your data
         sample_batch = next(iter(self.train_loader))
-        _, object_labels, style_labels = sample_batch
+        object_labels = sample_batch['object_labels_1']
+        style_labels = sample_batch['style_labels']
         unique_objects = set(object_labels)
         unique_styles = set(style_labels)
 
@@ -769,6 +1142,11 @@ class SAEConceptLatentOptimizer:
         return object_to_latent, style_to_latent
 
     def assign_concepts_to_latents_from_scores(self, hook_name):
+        print(f"✅ Using hardcoded concept assignments for {hook_name}")
+        print(f"   Objects: {len(PREDEFINED_ASSIGNMENTS['objects'])}")
+        print(f"   Styles: {len(PREDEFINED_ASSIGNMENTS['styles'])}")
+        return PREDEFINED_ASSIGNMENTS["objects"].copy(), PREDEFINED_ASSIGNMENTS["styles"].copy()
+
         """
         Assign both objects and styles to specific latents.
         Enhanced to support random assignment when training from scratch.
@@ -996,23 +1374,25 @@ class SAEConceptLatentOptimizer:
                 if batch_idx >= 3:  # Very limited for efficiency
                     break
                     
-                activations, object_labels, style_labels = batch_data
+                activations = batch_data['activations']
+                object_labels = batch_data['object_labels_1']
+                style_labels = batch_data['style_labels']
                 # Combine all concepts for analysis
                 all_concepts = object_labels + style_labels
 
                 try:
                     activations = activations.to(self.device, dtype=self.dtype)
-
+                
                     # Handle reshaping
+                    original_shape = activations.shape  # Define it BEFORE the if block
                     if len(activations.shape) == 3:
-                        original_shape = activations.shape
                         activations = activations.reshape(-1, activations.shape[-1])
                     
                     pre_acts = model.pre_acts(activations)
                     
                     # Reshape back if needed
                     if len(original_shape) == 3:
-                        batch_size = len(object_labels)  # Use object_labels length
+                        batch_size = len(object_labels)
                         seq_len = original_shape[1]
                         pre_acts = pre_acts.reshape(batch_size, seq_len, -1)
                         pre_acts = pre_acts.mean(dim=1)
@@ -1073,9 +1453,11 @@ class SAEConceptLatentOptimizer:
             # Default SAE configuration
             cfg = {
                 "expansion_factor": 16,
+                # "expansion_factor": 4, # For SDXL-turbo
                 "normalize_decoder": True,
                 "num_latents": 0,  # Will be calculated from d_in * expansion_factor
                 "k": 32,
+                # "k": 160, # For SDXL-turbo
                 "batch_topk": False,
                 "sample_topk": False,
                 "input_unit_norm": False,
@@ -1247,6 +1629,110 @@ class SAEConceptLatentOptimizer:
             
             print(f"Initialized wandb logging in OFFLINE mode")
             print(f"Logs will be stored in: {wandb_dir}")
+
+    def compute_removal_loss(self, sae, two_object_activations, objects_to_remove,
+                            objects_to_keep, object_to_latent):
+        """
+        Removal loss: suppress one object's latent and supervise reconstruction.
+
+        IMPORTANT: Only updates the decoder, not the encoder.
+
+        Args:
+            sae: The SAE model
+            two_object_activations: Activations from x(obj_i, obj_j) [batch, features]
+            objects_to_remove: List of object names to remove (one per sample in batch)
+            objects_to_keep: List of object names to keep (one per sample in batch)
+            object_to_latent: Mapping from object names to latent indices
+
+        Returns:
+            removal_loss: Average MSE across batch
+        """
+        model = sae.module if hasattr(sae, 'module') else sae
+        batch_size = len(objects_to_remove)
+
+        if batch_size == 0:
+            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+
+        # Handle shape: ensure 2D [batch, features]
+        orig_shape = two_object_activations.shape
+        if len(two_object_activations.shape) == 3:
+            two_object_activations = two_object_activations.reshape(
+                orig_shape[0] * orig_shape[1], orig_shape[2]
+            )
+
+        try:
+            # Step 1: Get pre-activations (no grad - we don't update encoder)
+            with torch.no_grad():
+                pre_acts = model.pre_acts(two_object_activations)
+
+            # Reshape pre_acts back if needed
+            if len(orig_shape) == 3:
+                pre_acts = pre_acts.reshape(batch_size, orig_shape[1], -1)
+                pre_acts = pre_acts.mean(dim=1)  # Average over time dimension
+
+            # Step 2: For each sample, suppress the appropriate object latent
+            suppressed_pre_acts = pre_acts.clone()
+
+            valid_samples = []
+            for i in range(batch_size):
+                object_to_remove = objects_to_remove[i]
+
+                if object_to_remove not in object_to_latent:
+                    continue
+                
+                latent_to_suppress = object_to_latent[object_to_remove]
+                suppressed_pre_acts[i, latent_to_suppress] = 0.0
+                valid_samples.append(i)
+
+            if len(valid_samples) == 0:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+
+            # Step 3: Get top-k from suppressed activations
+            top_acts, top_indices = model.select_topk(suppressed_pre_acts.detach())
+
+            # Step 4: Decode (with gradients for decoder)
+            reconstructed = model.decode(top_acts, top_indices)
+
+            # Step 5: Get target activations for each valid sample
+            target_activations = []
+            final_valid_indices = []
+
+            for idx in valid_samples:
+                object_to_keep = objects_to_keep[idx]
+                target = self.get_target_activation_for_removal(object_to_keep, batch_size=1)
+
+                if target is None:
+                    continue
+                
+                # Handle target shape
+                if len(target.shape) == 3:
+                    target = target.mean(dim=1)
+
+                target_activations.append(target.squeeze(0))
+                final_valid_indices.append(idx)
+
+            if len(target_activations) == 0:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+
+            # Stack targets
+            target_batch = torch.stack(target_activations)
+
+            # Only compute loss for samples we have targets for
+            valid_reconstructed = reconstructed[final_valid_indices]
+
+            # Step 6: Compute loss
+            removal_loss = F.mse_loss(valid_reconstructed, target_batch)
+
+            if torch.isnan(removal_loss) or torch.isinf(removal_loss):
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+
+            return removal_loss
+
+        except Exception as e:
+            print(f"❌ Error in removal loss computation: {e}")
+            import traceback
+            traceback.print_exc()
+            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
     def compute_reconstruction_loss(self, sae, activations):
         """Fixed reconstruction loss that handles tensor dimensions correctly."""
@@ -1506,7 +1992,7 @@ class SAEConceptLatentOptimizer:
 
         # Evaluate
         with torch.no_grad():
-            for batch_idx, (activations, object_labels, style_labels) in enumerate(loader):
+            for batch_idx, batch_data in enumerate(loader):
                 if batch_idx >= max_batches:
                     break
                 
@@ -1514,7 +2000,10 @@ class SAEConceptLatentOptimizer:
                 print(f"  Processing batch {batch_idx + 1}/{max_batches}...")
 
                 try:
-                    activations = activations.to(self.device, dtype=self.dtype)
+                    # Unpack from dictionary format
+                    activations = batch_data['activations'].to(self.device, dtype=self.dtype)
+                    object_labels = batch_data['object_labels_1']
+                    style_labels = batch_data['style_labels']
 
                     # Compute losses
                     recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
@@ -1629,6 +2118,10 @@ class SAEConceptLatentOptimizer:
             if self.world_size > 1:
                 dist.barrier()
             
+            # Build target activation cache for removal training
+            if self.enable_removal_training:
+                self.target_activation_cache = self.build_single_object_activation_cache()
+
             # Compute initial losses (only on rank 0 for logging purposes)
             if self.rank == 0 and self.start_epoch == 1:
                 train_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=False)
@@ -1679,88 +2172,87 @@ class SAEConceptLatentOptimizer:
                     data_iter = tqdm(data_iter, desc="Batches")
 
                 # Process batches
-                for batch_idx, (activations, object_labels, style_labels) in enumerate(data_iter):
+                for batch_idx, batch_data in enumerate(data_iter):
                     if batch_idx % 10 == 0:
                         torch.cuda.empty_cache()
-                    
-                    activations = activations.to(self.device)
-                    original_batch_size = activations.size(0)
 
-                    # Mixed precision training
-                    if self.mixed_precision and torch.cuda.is_available() and not self.use_float16:
-                        with torch.amp.autocast('cuda'):
-                            recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
+                    # Unpack batch data
+                    activations = batch_data['activations'].to(self.device)
+                    object_labels_1 = batch_data['object_labels_1']
+                    object_labels_2 = batch_data['object_labels_2']
+                    style_labels = batch_data['style_labels']
+                    sample_types = batch_data['sample_types']
 
-                            # Cross-entropy loss for concept-specific latents
-                            ce_loss = self.compute_cross_entropy_loss(
-                                pre_acts, 
-                                object_labels, 
-                                style_labels,
-                                object_to_latent,
-                                style_to_latent,
-                                original_batch_size=original_batch_size
-                            )
+                    # Separate samples by type
+                    single_obj_indices = [i for i, t in enumerate(sample_types) if t == 'single_object']
+                    two_obj_indices = [i for i, t in enumerate(sample_types) if t == 'two_objects']
 
-                            # Sparsity loss
-                            sparsity_loss = self.compute_sparsity_loss(pre_acts)
+                    total_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    recon_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    ce_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    sparsity_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    removal_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
-                            # Combined loss
-                            total_loss = (
-                                self.reconstruction_weight * recon_loss +
-                                self.cross_entropy_weight * ce_loss +
-                                self.sparsity_weight * sparsity_loss
-                            )
-                        
-                        # Optimization step with mixed precision
-                        optimizer.zero_grad()
-                        self.scaler.scale(total_loss).backward()
-                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                            self.scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
-                            self.scaler.step(optimizer)
-                            self.scaler.update()
-                            optimizer.zero_grad(set_to_none=True)
-                    else:
-                        # Standard precision training
-                        recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
+                    # === PART 1: Standard training on single-object samples ===
+                    if len(single_obj_indices) > 0:
+                        single_activations = activations[single_obj_indices]
+                        single_objects = [object_labels_1[i] for i in single_obj_indices]
+                        single_styles = [style_labels[i] for i in single_obj_indices]
 
-                        # Cross-entropy loss for concept-specific latents
+                        # Standard losses (Reconstruction + SAEmnesia)
+                        recon_loss, pre_acts = self.compute_reconstruction_loss(sae, single_activations)
                         ce_loss = self.compute_cross_entropy_loss(
-                            pre_acts, 
-                            object_labels, 
-                            style_labels,
-                            object_to_latent,
-                            style_to_latent,
-                            original_batch_size=original_batch_size
+                            pre_acts, single_objects, single_styles,
+                            object_to_latent, style_to_latent
                         )
-
-                        # Sparsity loss
                         sparsity_loss = self.compute_sparsity_loss(pre_acts)
 
-                        # Combined loss
-                        total_loss = (
+                        standard_loss = (
                             self.reconstruction_weight * recon_loss +
                             self.cross_entropy_weight * ce_loss +
                             self.sparsity_weight * sparsity_loss
                         )
-                        
-                        optimizer.zero_grad()
+                        total_loss += standard_loss
 
-                        # Check for NaN in loss
-                        if torch.isnan(total_loss).any():
-                            print(f"WARNING: NaN detected in loss, skipping backward")
-                            continue
-                        
-                        total_loss.backward()
+                    # === PART 2: Removal training on two-object samples ===
+                    if len(two_obj_indices) > 0 and self.enable_removal_training:
+                        two_obj_activations = activations[two_obj_indices]
+                        objects_to_remove = [object_labels_2[i] for i in two_obj_indices]  # Remove second object
+                        objects_to_keep = [object_labels_1[i] for i in two_obj_indices]    # Keep first object
 
-                        # Gradient clipping to prevent explosion
-                        torch.nn.utils.clip_grad_norm_(sae.parameters() if not isinstance(sae, DDP) else sae.module.parameters(), 1.0)
+                        # Compute removal loss (decoder-only)
+                        removal_loss = self.compute_removal_loss(
+                            sae,
+                            two_obj_activations,
+                            objects_to_remove,
+                            objects_to_keep,
+                            object_to_latent
+                        )
+                        print(f"  Removal Loss: {removal_loss:.6f}")
 
-                        # Gradient accumulation
-                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                            optimizer.step()
-                            optimizer.zero_grad(set_to_none=True)
+                        total_loss += self.removal_weight * removal_loss
+
+                    # Backward and optimize
+                    optimizer.zero_grad()
+
+                    # Check for NaN in loss
+                    if torch.isnan(total_loss).any():
+                        print(f"WARNING: NaN detected in loss, skipping backward")
+                        continue
                     
+                    total_loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        sae.parameters() if not isinstance(sae, DDP) else sae.module.parameters(), 
+                        1.0
+                    )
+
+                    # Gradient accumulation
+                    if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+
                     # Accumulate losses for logging
                     total_loss_sum += total_loss.item()
                     recon_loss_sum += recon_loss.item()
@@ -1768,8 +2260,8 @@ class SAEConceptLatentOptimizer:
                     sparsity_loss_sum += sparsity_loss.item()
                     num_batches += 1
 
-                    del recon_loss, ce_loss, sparsity_loss, total_loss
-
+                    # Clean up
+                    del recon_loss, ce_loss, sparsity_loss, removal_loss, total_loss
                     if 'pre_acts' in locals():
                         del pre_acts
 
@@ -1960,6 +2452,10 @@ def run_distributed_training(rank, world_size, args):
         patience=args.patience,
         resume=args.resume,
         from_scratch=args.from_scratch,
+        enable_removal_training=args.enable_removal_training,
+        removal_weight=args.removal_weight,                    
+        two_object_activations_dir=args.two_object_activations_dir,
+        single_object_ratio=args.single_object_ratio,
     )
 
     # Update the SAE models to be DDP models
@@ -2048,6 +2544,23 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint")
     parser.add_argument("--from_scratch", action="store_true", help="Start training from scratch without loading any previous checkpoints")
 
+    # Removal training parameters
+    parser.add_argument("--enable_removal_training", action="store_true", help="Enable concept removal training")
+    parser.add_argument("--removal_weight", type=float, default=1.0, help="Weight for removal loss")
+
+    parser.add_argument(
+        "--two_object_activations_dir", 
+        type=str, 
+        default=None,
+        help="Path to two-object activation datasets. If None, looks in activations_dir"
+    )
+    parser.add_argument(
+        "--single_object_ratio",
+        type=float,
+        default=0.5,
+        help="Target ratio of single-object samples in training (0.0-1.0)"
+    )
+
     args = parser.parse_args()
     
     world_size = args.num_gpus
@@ -2091,7 +2604,11 @@ def main():
                 use_float16=args.use_float16,
                 patience=args.patience,
                 resume=args.resume,
-                from_scratch=args.from_scratch
+                from_scratch=args.from_scratch,
+                enable_removal_training=args.enable_removal_training,  
+                removal_weight=args.removal_weight,                    
+                two_object_activations_dir=args.two_object_activations_dir,
+                single_object_ratio=args.single_object_ratio,
             )
     
             optimizer.train()

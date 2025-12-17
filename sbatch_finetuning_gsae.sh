@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=no_ce_v1.6_sdxl_from_scratch_dual_concept
-#SBATCH --output=sbatch_output/%j_no_ce_sdxl_from_scratch.out
-#SBATCH --error=sbatch_output/%j_no_ce_sdxl_from_scratch.err
-#SBATCH --account=IscrC_SAOU
+#SBATCH --job-name=gsae_fs
+#SBATCH --output=sbatch_output/%j_gsae_fs.out
+#SBATCH --error=sbatch_output/%j_gsae_fs.err
+#SBATCH --account=IscrC_MAGNIFY
 #SBATCH --time=24:00:00
 #SBATCH --mem=300G
 #SBATCH --partition=boost_usr_prod
@@ -14,7 +14,7 @@
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
 # Use a location with more disk space - typically /leonardo_work has more quota than /leonardo_scratch/fast
-LARGE_CACHE_BASE="/leonardo_work/IscrC_MAGNIFY/cassano/temp_cache"
+LARGE_CACHE_BASE="/leonardo_work/IscrC_SAOU/cassano/temp_cache"
 
 # Increase NCCL timeout and add debugging
 export NCCL_BLOCKING_WAIT=1
@@ -88,24 +88,23 @@ df -h /leonardo_scratch/fast/IscrC_MAGNIFY/cassano/
 echo "Temporary files location:"
 df -h /leonardo_work/IscrC_MAGNIFY/cassano/
 
-# Name of the NEW dual concept Python script
-SCRIPT_NAME="/leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/old_sae_finetuning_v1.6.py"
+# Name of the dual concept Python script (v1.6 - reconstruction + BCE only)
+SCRIPT_NAME="/leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/g_sae_finetuning.py"
 
 # Path to SAE checkpoint directory
-# CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.1.attentions.1"
-CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.0.attentions.1"
+CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.1.attentions.1"
 
 # Directory containing concept activations WITH STYLE RECOVERY METADATA
 # This should contain the recovered_object_to_style_index.json file in metadata/
-# ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_MAGNIFY/cassano/finetuning_activations/objects"
-ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_SAOU/cassano/finetuning_activations/sdxl_objects"
+ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_MAGNIFY/cassano/finetuning_activations/objects"
 
 # JSON file paths for SEPARATE object and style scores
 OBJECT_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/objects/non_finetuned/scores.json"
 STYLE_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/styles/non_finetuned/scores.json"
 
-# Directory to save models and logs
-SAVE_DIR="/leonardo_work/IscrC_SAOU/cassano/saeuron/sae_checkpoints/dual_concept_optimized/sdxl-turbo/v1.6/ce_weight_0_sparsity_0.01"
+# Directory to save models and logs (v1.6 uses only reconstruction + BCE loss)
+# SAVE_DIR="/leonardo_work/IscrC_SAOU/cassano/saeuron/sae_checkpoints/dual_concept_optimized/g_sae/ce_weight_1.0"
+SAVE_DIR="/leonardo_scratch/large/userexternal/ecassano/sae_checkpoints/dual_concept_optimized/g_sae/ce_weight_1.0"
 
 # Make sure directories exist
 mkdir -p ${SAVE_DIR}
@@ -129,8 +128,7 @@ if [ ! -d "${ACTIVATIONS_DIR}" ]; then
 fi
 
 # Check for style recovery metadata (corrected path for hookpoint structure)
-# METADATA_PATH="${ACTIVATIONS_DIR}/unet.up_blocks.1.attentions.1/metadata/recovered_object_to_style_index.json"
-METADATA_PATH="${ACTIVATIONS_DIR}/unet.up_blocks.0.attentions.1/metadata/recovered_object_to_style_index.json"
+METADATA_PATH="${ACTIVATIONS_DIR}/unet.up_blocks.1.attentions.1/metadata/recovered_object_to_style_index.json"
 if [ ! -f "${METADATA_PATH}" ]; then
     echo "ERROR: Style recovery metadata not found at ${METADATA_PATH}"
     echo "Please run style recovery first!"
@@ -155,8 +153,8 @@ source ../../envs/saeuron_cassano/bin/activate
 # Display GPU info
 nvidia-smi
 
-# Run training with the NEW dual concept script
-echo "Running dual object-style concept training..."
+# Run training with the dual concept script (v1.6)
+echo "Running dual object-style concept training (v1.6 - Reconstruction + BCE only)..."
 echo "Object scores: ${OBJECT_SCORES_JSON_PATH}"
 echo "Style scores: ${STYLE_SCORES_JSON_PATH}"
 echo "Activations with styles: ${ACTIVATIONS_DIR}"
@@ -169,10 +167,9 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --style_scores_json_path ${STYLE_SCORES_JSON_PATH} \
     --device cuda \
     --learning_rate 5e-6 \
-    --num_epochs 150 \
+    --num_epochs 350 \
     --reconstruction_weight 1.0 \
-    --cross_entropy_weight 0 \
-    --sparsity_weight 0.01 \
+    --cross_entropy_weight 1.0 \
     --batch_size 128 \
     --save_dir ${SAVE_DIR} \
     --seed 42 \
@@ -183,11 +180,12 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --mixed_precision \
     --patience 5 \
     --resume \
-    --from_scratch \
-    --use_float16
+    --use_float16 \
+    --from_scratch
 
+# Note: --sparsity_weight parameter removed in v1.6 (only uses reconstruction + BCE loss)
+# Note: --from_scratch flag available if you want to train from scratch instead of fine-tuning
 
-# --resume \
 # Check if training completed successfully
 if [ $? -eq 0 ]; then
     echo "✅ Training completed successfully!"
@@ -219,5 +217,6 @@ echo "Activations (with styles): ${ACTIVATIONS_DIR}"
 echo "Object Scores: ${OBJECT_SCORES_JSON_PATH}"
 echo "Style Scores: ${STYLE_SCORES_JSON_PATH}"
 echo "Output Directory: ${SAVE_DIR}"
-echo "Training Type: Dual Object-Style Concept Assignment"
+echo "Training Type: Dual Object-Style Concept Assignment (v1.6 - Reconstruction + BCE)"
+echo "Loss Components: Reconstruction (weight=1.0) + BCE (weight=3.0)"
 echo "======================="

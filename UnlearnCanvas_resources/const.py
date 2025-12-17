@@ -6,6 +6,15 @@ style_list = "Abstractionism Artist_Sketch Blossom_Season Bricks Byzantine Carto
 
 class_list = "Architectures Bears Birds Butterfly Cats Dogs Fishes Flame Flowers Frogs Horses Human Jellyfish Rabbits Sandwiches Sea Statues Towers Trees Waterfalls"
 
+theme_available_subsample = [
+    "Ink_Art",
+    "Monet",
+    "On_Fire",
+    "Pencil_Drawing",
+    "Red_Blue_Ink",
+    # "Van_Gogh",
+]
+
 # 50 style version
 theme_available = [
     "Abstractionism",
@@ -92,4 +101,15 @@ class_available = [
     "Towers",
     "Trees",
     "Waterfalls",
+]
+
+class_available_subsample = [
+    "Architectures",
+    "Bears",
+    "Butterfly",
+    "Fishes",
+    "Horses",
+    "Jellyfish",
+    "Rabbits",
+    "Sandwiches",
 ]

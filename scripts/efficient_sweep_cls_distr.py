@@ -5,6 +5,7 @@ import os
 import pickle
 import sys
 import gc
+import json
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -16,7 +17,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 
 import utils.hooks as hooks
-from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline
+from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline, HookedStableDiffusionXLPipeline
 from SAE.sae import Sae
 from SAE.unlearning_utils import compute_feature_importance
 
@@ -24,7 +25,9 @@ sys.path.append("..")
 
 import fire
 
-from UnlearnCanvas_resources.const import class_available, theme_available
+# from UnlearnCanvas_resources.const import class_available, theme_available
+from UnlearnCanvas_resources.const import class_available_subsample as class_available
+from UnlearnCanvas_resources.const import theme_available_subsample as theme_available
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch._inductor.config.conv_1x1_as_mm = True
@@ -121,7 +124,7 @@ def main(
     hookpoint,
     class_latents_path,
     sae_checkpoint,
-    seed=42,
+    seed=188,
     steps=100,
     percentiles=[99.99, 99.995, 99.999],
     multipliers=[-1.0, -5.0, -10.0, -15.0, -20.0, -25.0, -30.0],
@@ -133,8 +136,27 @@ def main(
     accelerator = Accelerator()
     device = accelerator.device
 
+    # Detect model type from model_index.json
+    model_index_path = os.path.join(pipe_checkpoint, "model_index.json")
+    is_sdxl = False
+    
+    if os.path.exists(model_index_path):
+        with open(model_index_path, 'r') as f:
+            model_index = json.load(f)
+        # SDXL has text_encoder_2, SD1.5 doesn't
+        is_sdxl = "text_encoder_2" in model_index
+        
+    if is_sdxl:
+        if accelerator.is_main_process:
+            print("🎯 Detected SDXL model - using HookedStableDiffusionXLPipeline")
+        PipelineClass = HookedStableDiffusionXLPipeline
+    else:
+        if accelerator.is_main_process:
+            print("🎯 Detected SD1.5 model - using HookedStableDiffusionPipeline")
+        PipelineClass = HookedStableDiffusionPipeline
+
     # Load model with memory optimization options
-    model = HookedStableDiffusionPipeline.from_pretrained(
+    model = PipelineClass.from_pretrained(
         pipe_checkpoint,
         torch_dtype=torch.float16,  # Using fp16 to save memory
         safety_checker=None,
@@ -155,8 +177,20 @@ def main(
                 )
         model.enable_xformers_memory_efficient_attention()
     
-    # Move model to device
     model = model.to(device)
+
+    # Convert VAE to float32 to prevent black images with SDXL
+    model.pipe.vae = model.pipe.vae.to(dtype=torch.float32)
+    if accelerator.is_main_process:
+        print(f"✓ VAE converted to float32 (dtype: {model.pipe.vae.dtype})")
+    
+    # For SDXL, enable VAE optimizations
+    if is_sdxl and hasattr(model.pipe, 'enable_vae_slicing'):
+        model.pipe.enable_vae_slicing()
+    
+    # Disable VAE tiling if it causes issues
+    if hasattr(model.pipe, 'disable_vae_tiling'):
+        model.pipe.disable_vae_tiling()
     
     # Set up generator
     seed_everything(seed)

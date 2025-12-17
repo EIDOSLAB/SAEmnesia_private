@@ -44,6 +44,30 @@ def run():
             print("\n🔄 Generating metadata for object+style querying...")
             runner.generate_activation_metadata()
             print("✅ Metadata generation complete!")
+    
+    elif mode == 'dual_object':
+        # NEW: Dual object mode for two-object removal training
+        from SAE.dual_object_cache_activations_runner_unlearn_canvas import CacheActivationsRunner
+        from SAE.config import FineTuningCacheActivationsRunnerConfig
+        from simple_parsing import parse
+        
+        print("🎯 Running in DUAL OBJECT mode")
+        print("About to parse FineTuningCacheActivationsRunnerConfig")
+        args = parse(FineTuningCacheActivationsRunnerConfig)
+        
+        print(f"Args parsed. organization_type = {args.organization_type}")
+        print(f"All args: {vars(args)}")
+        
+        # Run the dual object cache activations runner
+        runner = CacheActivationsRunner(args)
+        datasets = runner.run()
+        
+        # Generate metadata after caching (automatic in dual_object mode or if flag is set)
+        if generate_metadata or mode == 'dual_object':
+            print("\n🔄 Generating metadata for dual-object querying...")
+            runner.generate_activation_metadata()
+            print("✅ Metadata generation complete!")
+    
     elif mode == 'metadata':
         # Metadata-only mode for existing cached activations
         from SAE.fine_tuning_cache_activations_runner_unlearn_canvas import ActivationMetadataGenerator
@@ -62,7 +86,28 @@ def run():
         generator.generate_metadata(args.hook_names)
         
         print("✅ Metadata generation complete!")
-        return  # Exit early, don't run the normal caching 
+        return  # Exit early, don't run the normal caching
+    
+    elif mode == 'dual_object_metadata':
+        # NEW: Metadata-only mode for dual-object cached activations
+        from SAE.dual_object_cache_activations_runner_unlearn_canvas import ActivationMetadataGenerator
+        from SAE.config import FineTuningCacheActivationsRunnerConfig
+        from simple_parsing import parse
+        
+        print("Parsing config for dual-object metadata generation...")
+        args = parse(FineTuningCacheActivationsRunnerConfig)
+        
+        if args.new_cached_activations_path is None:
+            print("❌ Error: new_cached_activations_path must be specified for dual_object_metadata mode")
+            sys.exit(1)
+        
+        print(f"Generating dual-object metadata for: {args.new_cached_activations_path}")
+        generator = ActivationMetadataGenerator(args.new_cached_activations_path)
+        generator.generate_metadata(args.hook_names)
+        
+        print("✅ Dual-object metadata generation complete!")
+        return  # Exit early, don't run the normal caching
+    
     else:
         from SAE.cache_activations_runner_unlearn_canvas import CacheActivationsRunner
         from SAE.config import CacheActivationsRunnerConfig

@@ -27,11 +27,29 @@ def main(
     style_ckpt,
     class_ckpt,
     cls=None,
-    seed= [188], # [188, 288, 588, 688, 888],
+    seed=[188],  # [188, 288, 588, 688, 888],
     dry_run=False,
     limit_classes=-1,
     batch_size=32,
 ):
+    """
+    Evaluate classification accuracy for decoder-only steering results.
+    
+    This script works with the new directory structure:
+    - Old: percentile_{percentile}_multiplier_{multiplier}/{class}/
+    - New: percentile_{percentile}_alpha_{alpha}/{class}/
+    
+    Args:
+        input_dir: Input directory containing generated images (should point to a specific class folder)
+        output_dir: Output directory for classification results
+        style_ckpt: Path to style classifier checkpoint
+        class_ckpt: Path to class classifier checkpoint
+        cls: Class name being evaluated (used for output naming)
+        seed: List of seeds used during generation
+        dry_run: If True, don't save results
+        limit_classes: Limit number of classes to evaluate (-1 for all)
+        batch_size: Batch size for classification
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     input_dir = os.path.join(input_dir, cls) if cls is not None else input_dir
 
@@ -124,9 +142,14 @@ def main(
 
         def __getitem__(self, idx):
             img_path = self.image_paths[idx]
-            image = Image.open(img_path)
-            image = image_transform(image)
-            return image, self.labels[idx]
+            try:
+                image = Image.open(img_path).convert('RGB')
+                image = image_transform(image)
+                return image, self.labels[idx]
+            except Exception as e:
+                print(f"Error loading image {img_path}: {e}")
+                # Return a black image as fallback
+                return torch.zeros(3, 224, 224), self.labels[idx]
 
     classes_to_use = (
         class_available[:limit_classes] if limit_classes > 0 else class_available
@@ -138,9 +161,15 @@ def main(
     style_label_map = {theme: idx for idx, theme in enumerate(theme_available)}
     class_label_map = {class_: idx for idx, class_ in enumerate(classes_to_use)}
 
-    for theme in theme_available:
-        print("Processing theme:", theme)
+    print(f"Processing directory: {input_dir}")
+    print(f"Classes to evaluate: {classes_to_use}")
 
+    for theme in theme_available:
+        if theme == "Seed_Images":
+            continue
+        print(f"Collecting images for theme: {theme}")
+
+    # Collect all image paths
     for t, test_theme in enumerate(theme_available):
         if test_theme == "Seed_Images":
             continue
@@ -150,17 +179,28 @@ def main(
                     input_dir,
                     f"{test_theme}_{object_class}_seed{s}.jpg",
                 )
-                style_image_paths.append(img_path)
-                class_image_paths.append(img_path)
-                class_labels.append(class_label_map[object_class])
-                style_labels.append(style_label_map[test_theme])
+                if os.path.exists(img_path):
+                    style_image_paths.append(img_path)
+                    class_image_paths.append(img_path)
+                    class_labels.append(class_label_map[object_class])
+                    style_labels.append(style_label_map[test_theme])
+                else:
+                    print(f"Warning: Image not found: {img_path}")
+                
                 class_image_path = os.path.join(
                     input_dir,
                     f"{object_class}_seed{s}.jpg",
                 )
-                if class_image_path not in class_image_paths:
+                if os.path.exists(class_image_path) and class_image_path not in class_image_paths:
                     class_image_paths.append(class_image_path)
                     class_labels.append(class_label_map[object_class])
+
+    print(f"Total style images to evaluate: {len(style_image_paths)}")
+    print(f"Total class images to evaluate: {len(class_image_paths)}")
+
+    if len(style_image_paths) == 0 or len(class_image_paths) == 0:
+        print("Warning: No images found to evaluate!")
+        return
 
     style_dataset = ImageDataset(style_image_paths, style_labels)
     class_dataset = ImageDataset(class_image_paths, class_labels)
@@ -171,7 +211,8 @@ def main(
         class_dataset, batch_size=batch_size, shuffle=False, num_workers=4
     )
 
-    for batch_images, batch_style_labels in tqdm(style_dataloader):
+    print("Evaluating style classification...")
+    for batch_images, batch_style_labels in tqdm(style_dataloader, desc="Style eval"):
         batch_images = batch_images.to(device)
         batch_style_labels = batch_style_labels.to(device)
 
@@ -205,8 +246,10 @@ def main(
     if not dry_run:
         style_output_path = os.path.join(output_dir, f"{cls}.pth")
         torch.save(style_results, style_output_path)
+        print(f"Style results saved to: {style_output_path}")
 
-    for batch_images, batch_class_labels in tqdm(class_dataloader):
+    print("Evaluating class classification...")
+    for batch_images, batch_class_labels in tqdm(class_dataloader, desc="Class eval"):
         batch_images = batch_images.to(device)
         batch_class_labels = batch_class_labels.to(device)
 
@@ -238,6 +281,12 @@ def main(
     if not dry_run:
         class_output_path = os.path.join(output_dir, f"{cls}_cls.pth")
         torch.save(class_results, class_output_path)
+        print(f"Class results saved to: {class_output_path}")
+
+    # Print summary statistics
+    print("\n=== Classification Summary ===")
+    print(f"Style accuracy: {sum(style_results['acc'].values()) / len([t for t in theme_available if t != 'Seed_Images']):.4f}")
+    print(f"Class accuracy: {sum(class_results['acc'].values()) / len(class_available):.4f}")
 
 
 if __name__ == "__main__":

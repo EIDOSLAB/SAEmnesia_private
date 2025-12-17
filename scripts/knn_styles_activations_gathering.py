@@ -1,11 +1,12 @@
 """
 Gather feature activations from a SAE for a given hookpoint and save them to a file.
 Save-optimized version to prevent OOM errors during file saving.
+For themes/styles instead of object classes.
+Collects UNCONDITIONAL activations (before text conditioning influence).
 """
 
 import os
 import sys
-import json
 
 import fire
 import torch
@@ -14,7 +15,7 @@ from diffusers.utils.import_utils import is_xformers_available
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 
-from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline, HookedStableDiffusionXLPipeline
+from SAE.hooked_sd_noised_pipeline import HookedStableDiffusionPipeline
 from SAE.sae import Sae
 from UnlearnCanvas_resources.const import class_available, theme_available
 
@@ -46,6 +47,7 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
     temp_dir = os.path.join(save_dir, "temp_tensors")
     os.makedirs(temp_dir, exist_ok=True)
     
+    # Setup style prompts dictionary
     style_prompts_dict = {
         theme: [] for theme in theme_available if theme != "Seed_Images"
     }
@@ -75,36 +77,17 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
     sae.cfg.batch_topk = False
     sae.cfg.sample_topk = False
 
-    # Detect model type from model_index.json
-    model_index_path = os.path.join(pipe_path, "model_index.json")
-    is_sdxl = False
-    
-    if os.path.exists(model_index_path):
-        with open(model_index_path, 'r') as f:
-            model_index = json.load(f)
-        # SDXL has text_encoder_2, SD1.5 doesn't
-        is_sdxl = "text_encoder_2" in model_index
-        
-    if is_sdxl:
-        print("🎯 Detected SDXL model - using HookedStableDiffusionXLPipeline")
-        PipelineClass = HookedStableDiffusionXLPipeline
-    else:
-        print("🎯 Detected SD1.5 model - using HookedStableDiffusionPipeline")
-        PipelineClass = HookedStableDiffusionPipeline
-
-    pipe = PipelineClass.from_pretrained(
+    pipe = HookedStableDiffusionPipeline.from_pretrained(
         pipe_path,
         torch_dtype=torch.float16,
         safety_checker=None,
     ).to("cuda")
-    
     if is_xformers_available():
         print("Enabling xFormers memory efficient attention")
         pipe.unet.enable_xformers_memory_efficient_attention()
 
     # Instead of keeping everything in memory, we'll track file paths
     style_latents_paths = {}
-    style_activations_paths = {}
 
     progress_bar = tqdm.tqdm(
         list(style_prompts_dict.keys()), total=len(style_prompts_dict)
@@ -119,39 +102,23 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
         torch.cuda.empty_cache()
         gc.collect()
         
+        # CRITICAL: Set unconditional=True to extract unconditional activations
         _, acts_cache = pipe.run_with_cache(
             prompt=prompts,
             generator=generator,
             num_inference_steps=steps,
-            save_input=False,
-            save_output=True,
+            save_input=True,  # Collect input activations
+            save_output=False,  # Not collecting output
             positions_to_cache=[hookpoint],
-            guidance_scale=9.0,
+            guidance_scale=9.0,  # Keep guidance for proper generation
             output_type="latent",  # prevent decoding to pixel space
+            unconditional=True,  # KEY: Extract only unconditional activations
         )
         
-        activations = acts_cache["output"][hookpoint].cpu()
+        # Extract unconditional activations
+        activations = acts_cache["input"][hookpoint].cpu()
         assert activations.shape[0] == len(prompts)
         assert activations.shape[1] == steps
-        
-        # Process activations for saving
-        n_prompts = activations.shape[0]
-        t = activations.shape[1]  # timesteps
-        
-        # Reshape: [n_prompts, steps, ...] -> [n_prompts*steps, ...]
-        reshaped_acts = activations.reshape(n_prompts * t, -1, sae.d_in)
-        # Further reshape: [n_prompts*steps, h*w, d_in] -> [n_prompts*h*w*t, d_in]
-        h_w = reshaped_acts.shape[1]  # h*w spatial dimensions
-        reshaped_acts = reshaped_acts.reshape(n_prompts * h_w * t, sae.d_in)
-        
-        # Save activations to temporary file
-        act_path = os.path.join(temp_dir, f"{theme}_activations.pt")
-        save_tensor_to_disk(reshaped_acts, act_path)
-        style_activations_paths[theme] = act_path
-        
-        # Free up the memory used by reshaped_acts
-        del reshaped_acts
-        gc.collect()
         
         # Process SAE latents
         sae_latents = []
@@ -178,9 +145,6 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
         torch.cuda.empty_cache()
         gc.collect()
 
-    # After all themes are processed, we'll combine the tensors into dictionaries and save them
-    print("Combining tensors into final dictionaries...")
-    
     # First, save style_latents_dict
     print("Building and saving style_latents_dict...")
     style_latents_dict = {}
@@ -193,6 +157,8 @@ def main(checkpoint_path, hookpoint, pipe_path, save_dir, steps=100, seed=188):
         pickle.dump(style_latents_dict, f)
     print(f"Saved to {latents_file}")
     
+    print("Done!")
+
 
 if __name__ == "__main__":
     fire.Fire(main)

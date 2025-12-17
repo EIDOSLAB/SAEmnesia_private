@@ -9,6 +9,10 @@ this assignment through cross-entropy loss.
 
 Enhanced version that handles both objects and styles with separate latent assignments.
 Added from-scratch training capability.
+
+EDITED VERSION: Uses only two loss components:
+1. Reconstruction loss: (x̂ - x)² / x²
+2. BCE loss: Applied to sigmoid-activated latents (after TopK + Sigmoid)
 """
 import os
 import sys
@@ -26,7 +30,7 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 
-from SAE.sae import Sae, SaeConfig
+from SAE.g_sae import Sae, SaeConfig
 import torch
 import numpy as np
 from pathlib import Path
@@ -164,6 +168,10 @@ class SAEConceptLatentOptimizer:
     1. Loads raw activations for different concepts with both object and style labels
     2. Assigns each concept (object/style) to a specific latent neuron based on pre-computed scores from JSON files
     3. Fine-tunes the SAE to maintain reconstruction while encouraging concept-specific latent assignments
+    
+    Uses only TWO loss components:
+    - Reconstruction loss: (x̂ - x)² / x²
+    - BCE loss: Applied to sigmoid-activated latents (after TopK + Sigmoid)
     """
     def __init__(
         self,
@@ -176,7 +184,6 @@ class SAEConceptLatentOptimizer:
         num_epochs=5,
         reconstruction_weight=1.0,
         cross_entropy_weight=1.0,
-        sparsity_weight=0.01,
         batch_size=32,
         save_dir="sae-concept-latent-optimized",
         seed=42,
@@ -201,7 +208,6 @@ class SAEConceptLatentOptimizer:
         self.num_epochs = num_epochs
         self.reconstruction_weight = reconstruction_weight
         self.cross_entropy_weight = cross_entropy_weight
-        self.sparsity_weight = sparsity_weight
         self.batch_size = batch_size
         self.save_dir = Path(save_dir)
         self.seed = seed
@@ -820,12 +826,10 @@ class SAEConceptLatentOptimizer:
         train_diff = val_losses['total_loss'] - train_losses['total_loss']
         recon_diff = val_losses['recon_loss'] - train_losses['recon_loss']
         ce_diff = val_losses['ce_loss'] - train_losses['ce_loss']
-        sparsity_diff = val_losses['sparsity_loss'] - train_losses['sparsity_loss']
 
         print(f"{'Total Loss':<20} {train_losses['total_loss']:<12.6f} {val_losses['total_loss']:<12.6f} {train_diff:>+12.6f}")
         print(f"{'Reconstruction':<20} {train_losses['recon_loss']:<12.6f} {val_losses['recon_loss']:<12.6f} {recon_diff:>+12.6f}")
         print(f"{'Cross Entropy':<20} {train_losses['ce_loss']:<12.6f} {val_losses['ce_loss']:<12.6f} {ce_diff:>+12.6f}")
-        print(f"{'Sparsity':<20} {train_losses['sparsity_loss']:<12.6f} {val_losses['sparsity_loss']:<12.6f} {sparsity_diff:>+12.6f}")
 
         # Early stopping info
         print(f"\n🛑 EARLY STOPPING INFO:")
@@ -981,91 +985,682 @@ class SAEConceptLatentOptimizer:
         print(f"{dataset_type} concept assignment: {correct_concepts}/{total_concepts} ({success_rate:.1%})")
 
     def get_latent_distribution_statistics(self, sae, data_loader, object_to_latent, style_to_latent):
-        """Fixed statistics calculation with proper bounds checking."""
+        """
+        Calculate latent distribution statistics from sigmoid-activated sparse representations.
+        Works with the paper's SAE architecture that outputs sparse activations.
+        """
         model = sae.module if hasattr(sae, 'module') else sae
         model.eval()
 
         distributions = {}
-        concept_probs = {}
+        concept_activations = {}  # Store sparse activations per concept
         combined_concept_to_latent = {**object_to_latent, **style_to_latent}
 
-        print("Calculating latent distribution statistics...")
+        print("Calculating latent distribution statistics from sparse activations...")
 
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(data_loader):
-                if batch_idx >= 3:  # Very limited for efficiency
+                if batch_idx >= 3:  # Limited for efficiency
                     break
                     
                 activations, object_labels, style_labels = batch_data
-                # Combine all concepts for analysis
-                all_concepts = object_labels + style_labels
 
                 try:
                     activations = activations.to(self.device, dtype=self.dtype)
 
-                    # Handle reshaping
-                    if len(activations.shape) == 3:
-                        original_shape = activations.shape
-                        activations = activations.reshape(-1, activations.shape[-1])
+                    # Get SAE output - this returns top_acts and top_indices
+                    # top_acts are sigmoid-activated values, top_indices are their positions
+                    output = model(activations)
+                    top_acts = output.latent_acts  # Sigmoid(TopK(h))
+                    top_indices = output.latent_indices  # Indices of top-k
                     
-                    pre_acts = model.pre_acts(activations)
-                    
-                    # Reshape back if needed
-                    if len(original_shape) == 3:
-                        batch_size = len(object_labels)  # Use object_labels length
-                        seq_len = original_shape[1]
-                        pre_acts = pre_acts.reshape(batch_size, seq_len, -1)
-                        pre_acts = pre_acts.mean(dim=1)
-                    
-                    # CRITICAL: Check dimensions
-                    if pre_acts.shape[1] != model.num_latents:
-                        print(f"  Skipping batch - dimension mismatch: {pre_acts.shape[1]} vs {model.num_latents}")
+                    # Handle reshaping if needed
+                    if len(top_acts.shape) == 3:
+                        # [batch, seq, k] - average over sequence
+                        batch_size = top_acts.shape[0]
+                        # We need to aggregate the sparse activations across sequence
+                        # For each sample, collect all activated latents across the sequence
+                    elif len(top_acts.shape) == 2:
+                        batch_size = len(object_labels)
+                    else:
+                        print(f"  Unexpected shape: {top_acts.shape}")
                         continue
                     
-                    probs = F.softmax(pre_acts, dim=1)
-                    
-                    # Collect stats for objects and styles separately
+                    # For each sample, aggregate its activated latents
                     for i, (obj_concept, style_concept) in enumerate(zip(object_labels, style_labels)):
-                        # Object concept
-                        if obj_concept not in concept_probs:
-                            concept_probs[obj_concept] = []
-                        concept_probs[obj_concept].append(probs[i])
+                        # Get activations for this sample
+                        if len(top_acts.shape) == 3:
+                            sample_acts = top_acts[i]  # [seq, k]
+                            sample_indices = top_indices[i]  # [seq, k]
+                            # Flatten across sequence
+                            sample_acts = sample_acts.reshape(-1)
+                            sample_indices = sample_indices.reshape(-1)
+                        else:
+                            sample_acts = top_acts[i]  # [k]
+                            sample_indices = top_indices[i]  # [k]
                         
-                        # Style concept (if not "none")
+                        # Store activations for object concept
+                        if obj_concept not in concept_activations:
+                            concept_activations[obj_concept] = {'acts': [], 'indices': []}
+                        concept_activations[obj_concept]['acts'].append(sample_acts.cpu())
+                        concept_activations[obj_concept]['indices'].append(sample_indices.cpu())
+                        
+                        # Store activations for style concept (if not "none")
                         if style_concept != "none":
-                            if style_concept not in concept_probs:
-                                concept_probs[style_concept] = []
-                            concept_probs[style_concept].append(probs[i])
+                            if style_concept not in concept_activations:
+                                concept_activations[style_concept] = {'acts': [], 'indices': []}
+                            concept_activations[style_concept]['acts'].append(sample_acts.cpu())
+                            concept_activations[style_concept]['indices'].append(sample_indices.cpu())
                         
                 except Exception as e:
                     print(f"  Error in batch {batch_idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
+        
+        # Calculate statistics for each concept from sparse activations
+        for concept, data in concept_activations.items():
+            if concept not in combined_concept_to_latent:
+                continue
                 
-        # Calculate statistics for each concept
-        for concept, prob_list in concept_probs.items():
-            if prob_list and concept in combined_concept_to_latent:
-                try:
-                    mean_probs = torch.stack(prob_list).mean(dim=0)
-                    dominant_latent = torch.argmax(mean_probs).item()
+            try:
+                # Aggregate all activations for this concept into a dense representation
+                # This tells us which latents are most activated for this concept
+                num_latents = model.num_latents
+                latent_sums = torch.zeros(num_latents)
+                latent_counts = torch.zeros(num_latents)
+                
+                for acts, indices in zip(data['acts'], data['indices']):
+                    for act, idx in zip(acts, indices):
+                        if 0 <= idx < num_latents:
+                            latent_sums[idx] += act
+                            latent_counts[idx] += 1
+                
+                # Calculate average activation per latent
+                latent_avg = torch.zeros(num_latents)
+                mask = latent_counts > 0
+                latent_avg[mask] = latent_sums[mask] / latent_counts[mask]
+                
+                # Find dominant latent (most frequently/strongly activated)
+                dominant_latent = torch.argmax(latent_avg).item()
+                dominance_score = latent_avg[dominant_latent].item()
+                
+                # Calculate entropy over the sparse distribution
+                # Normalize to get probabilities
+                prob_dist = latent_avg / (latent_avg.sum() + 1e-10)
+                entropy = -torch.sum(prob_dist * torch.log(prob_dist + 1e-10)).item()
+                
+                distributions[concept] = {
+                    "dominant_latent": dominant_latent,
+                    "dominance_score": dominance_score,
+                    "entropy": entropy
+                }
                     
-                    # CRITICAL: Validate the dominant latent index
-                    if 0 <= dominant_latent < model.num_latents:
-                        dominance_score = mean_probs[dominant_latent].item()
-                        entropy = -torch.sum(mean_probs * torch.log(mean_probs + 1e-10)).item()
-                        
-                        distributions[concept] = {
-                            "dominant_latent": dominant_latent,
-                            "dominance_score": dominance_score,
-                            "entropy": entropy
-                        }
-                    else:
-                        print(f"  Invalid dominant latent {dominant_latent} for concept {concept}")
-                        
-                except Exception as e:
-                    print(f"  Error processing concept {concept}: {e}")
-                    continue
+            except Exception as e:
+                print(f"  Error processing concept {concept}: {e}")
+                continue
                 
         return distributions
+
+    def compute_reconstruction_loss(self, sae, activations):
+        """Compute reconstruction loss using normalized MSE: (x̂ - x)² / x²"""
+        model = sae.module if hasattr(sae, 'module') else sae
+
+        original_shape = activations.shape
+
+        # Ensure activations are in the shape the model expects: [batch, seq, features]
+        if len(activations.shape) == 2:
+            # [batch, features] - add seq dimension
+            batch_size, features = activations.shape
+            activations = activations.unsqueeze(1)  # [batch, 1, features]
+            seq_len = 1
+        elif len(activations.shape) == 3:
+            # [batch, seq, features] - already correct
+            batch_size, seq_len, features = activations.shape
+        else:
+            print(f"  Recon Error: Cannot handle activations shape: {activations.shape}")
+            return torch.tensor(1.0, device=self.device, dtype=self.dtype), None, None
+
+        try:
+            # Forward pass through SAE - expects [batch, seq, features]
+            output = model(activations)
+
+            # SAE outputs are in flattened form [batch*seq, features]
+            # We need to reshape them back to [batch, seq, features]
+            sae_out = output.sae_out
+            top_acts = output.latent_acts
+            top_indices = output.latent_indices
+
+            # Reshape sae_out from [batch*seq, features] back to [batch, seq, features]
+            sae_out = sae_out.reshape(batch_size, seq_len, features)
+
+            # Also reshape top_acts and top_indices for consistency
+            # top_acts shape: [batch*seq, k] -> [batch, seq, k]
+            # top_indices shape: [batch*seq, k] -> [batch, seq, k]
+            if len(top_acts.shape) == 2:
+                k = top_acts.shape[1]
+                top_acts = top_acts.reshape(batch_size, seq_len, k)
+                top_indices = top_indices.reshape(batch_size, seq_len, k)
+
+            e = (sae_out - activations).float()
+
+            # Compute normalized MSE: (x̂ - x)² / x²
+            eps = 1e-8
+            squared_diff = e ** 2
+            squared_original = activations.float() ** 2 + eps
+            loss = torch.mean(squared_diff / squared_original)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  Recon Warning: NaN/Inf in loss")
+                return torch.tensor(1.0, device=self.device, dtype=self.dtype), top_acts, top_indices
+
+            return loss, top_acts, top_indices
+
+        except Exception as e:
+            print(f"  Recon Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return torch.tensor(1.0, device=self.device, dtype=self.dtype), None, None
+
+    def compute_cross_entropy_loss(self, top_acts, top_indices, object_labels, style_labels, object_to_latent, style_to_latent):
+        """
+        Binary cross-entropy loss applied to sigmoid-activated latents.
+        OPTIMIZED: Uses vectorized operations instead of loops.
+        """
+        try:
+            model = list(self.saes.values())[0]
+            if hasattr(model, 'module'):
+                model = model.module
+            num_latents = model.num_latents
+            
+            batch_size = len(object_labels)
+            
+            # Handle input shapes - should now be [batch, seq, k] from reconstruction loss
+            if len(top_acts.shape) == 3:
+                batch_size_actual, seq_length, k = top_acts.shape
+            elif len(top_acts.shape) == 2:
+                # Fallback for [batch, k] case
+                batch_size_actual, k = top_acts.shape
+                seq_length = 1
+                top_acts = top_acts.unsqueeze(1)  # [batch, 1, k]
+                top_indices = top_indices.unsqueeze(1)
+            else:
+                print(f"  CE Loss Error: Unexpected shape: {top_acts.shape}")
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            
+            # VECTORIZED sparse-to-dense conversion
+            # Flatten batch and seq dimensions: [batch, seq, k] -> [batch*seq, k]
+            top_acts_flat = top_acts.reshape(-1, k)
+            top_indices_flat = top_indices.reshape(-1, k)
+            total_samples = top_acts_flat.shape[0]
+            
+            # FIX: Create dense representation with matching dtype
+            dense_acts = torch.zeros(total_samples, num_latents, 
+                                    device=self.device, dtype=top_acts_flat.dtype)  # Changed from self.dtype
+            
+            # Use advanced indexing for vectorized assignment
+            sample_indices = torch.arange(total_samples, device=self.device).unsqueeze(1).expand(-1, k)
+            valid_mask = (top_indices_flat >= 0) & (top_indices_flat < num_latents)
+            
+            dense_acts[sample_indices[valid_mask], top_indices_flat[valid_mask]] = top_acts_flat[valid_mask]
+            
+            # Average over sequence dimension: [batch*seq, num_latents] -> [batch, num_latents]
+            dense_acts = dense_acts.reshape(batch_size, seq_length, num_latents).mean(dim=1)
+            
+            # Get all assigned latent indices
+            all_assigned_latents = set()
+            all_assigned_latents.update(object_to_latent.values())
+            all_assigned_latents.update(style_to_latent.values())
+            all_assigned_latents = sorted(list(all_assigned_latents))
+            
+            if len(all_assigned_latents) == 0:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            
+            # FIX: Create target tensor with matching dtype
+            target_tensor = torch.zeros(batch_size, num_latents, device=self.device, dtype=dense_acts.dtype)
+            
+            # Vectorized target assignment
+            for i, (object_concept, style_concept) in enumerate(zip(object_labels, style_labels)):
+                if object_concept in object_to_latent:
+                    object_latent = object_to_latent[object_concept]
+                    if 0 <= object_latent < num_latents:
+                        target_tensor[i, object_latent] = 1.0
+                
+                if style_concept != "none" and style_concept in style_to_latent:
+                    style_latent = style_to_latent[style_concept]
+                    if 0 <= style_latent < num_latents:
+                        target_tensor[i, style_latent] = 1.0
+            
+            # Create mask for assigned latents only (vectorized)
+            assigned_latents_tensor = torch.tensor(all_assigned_latents, device=self.device, dtype=torch.long)
+            loss_mask = torch.zeros(batch_size, num_latents, device=self.device, dtype=torch.bool)
+            loss_mask[:, assigned_latents_tensor] = True
+            
+            if loss_mask.sum() == 0:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            
+            # Disable autocast only for BCE calculation
+            with torch.amp.autocast('cuda', enabled=False):
+                # FIX: Convert to float32 for BCE calculation
+                dense_acts_float = dense_acts.float()
+                target_tensor_float = target_tensor.float()
+                bce_loss = F.binary_cross_entropy(dense_acts_float, target_tensor_float, reduction='none')
+            
+            # Average loss over assigned latent positions
+            ce_loss = bce_loss[loss_mask].mean()
+            
+            # FIX: Convert back to original dtype if needed
+            if ce_loss.dtype != self.dtype:
+                ce_loss = ce_loss.to(dtype=self.dtype)
+            
+            return ce_loss
+            
+        except Exception as e:
+            print(f"  CE Loss Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+    
+    def evaluate_losses(self, sae, hook_name, object_to_latent, style_to_latent, is_validation=False):
+        """
+        Evaluate the losses for either training or validation set.
+        Updated to work with sparse SAE outputs.
+        """
+        # Choose the appropriate loader
+        loader = self.val_loader if is_validation else self.train_loader
+
+        # Set model to evaluation mode
+        if hasattr(sae, 'module'):
+            sae.module.eval()
+        else:
+            sae.eval()
+
+        # Track losses
+        total_loss_sum = 0.0
+        recon_loss_sum = 0.0
+        ce_loss_sum = 0.0
+        num_batches = 0
+
+        # Evaluate on a limited number of batches for efficiency
+        max_batches = 5
+
+        dataset_type = "validation" if is_validation else "training"
+        print(f"Evaluating {dataset_type} losses for {hook_name}...")
+
+        # Evaluate
+        with torch.no_grad():
+            for batch_idx, (activations, object_labels, style_labels) in enumerate(loader):
+                if batch_idx >= max_batches:
+                    break
+                
+                print(f"  Processing batch {batch_idx + 1}/{max_batches}...")
+
+                try:
+                    activations = activations.to(self.device, dtype=self.dtype)
+
+                    # Compute losses - now returns top_acts and top_indices
+                    recon_loss, top_acts, top_indices = self.compute_reconstruction_loss(sae, activations)
+                    
+                    if top_acts is None or top_indices is None:
+                        print(f"  Skipping batch {batch_idx} due to reconstruction error")
+                        continue
+                    
+                    ce_loss = self.compute_cross_entropy_loss(
+                        top_acts, top_indices, object_labels, style_labels, 
+                        object_to_latent, style_to_latent
+                    )
+
+                    # Combined loss
+                    total_loss = (
+                        self.reconstruction_weight * recon_loss +
+                        self.cross_entropy_weight * ce_loss
+                    )
+
+                    # Accumulate losses
+                    total_loss_sum += total_loss.item()
+                    recon_loss_sum += recon_loss.item()
+                    ce_loss_sum += ce_loss.item()
+                    num_batches += 1
+
+                except Exception as e:
+                    print(f"  Error in batch {batch_idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+                
+        # Calculate averages
+        if num_batches > 0:
+            avg_total_loss = total_loss_sum / num_batches
+            avg_recon_loss = recon_loss_sum / num_batches
+            avg_ce_loss = ce_loss_sum / num_batches
+        else:
+            print(f"  WARNING: No batches processed for {dataset_type}")
+            avg_total_loss = avg_recon_loss = avg_ce_loss = 0.0
+
+        print(f"  Completed {dataset_type} evaluation")
+
+        return {
+            "total_loss": avg_total_loss,
+            "recon_loss": avg_recon_loss,
+            "ce_loss": avg_ce_loss,
+        }
+
+    def check_early_stopping(self, val_loss, epoch, sae, hook_name, optimizer):
+        """Check early stopping and save best model when validation improves."""
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.patience_counter = 0
+            print(f"✅ New best validation loss: {self.best_val_loss:.6f}")
+
+            # Save the best model
+            if isinstance(sae, DDP):
+                self.save_best_model(sae.module, hook_name, epoch, optimizer)
+            else:
+                self.save_best_model(sae, hook_name, epoch, optimizer)
+
+            return False
+        else:
+            self.patience_counter += 1
+            print(f"⚠️  No improvement in validation loss. Patience: {self.patience_counter}/{self.patience}")
+
+            if self.patience_counter >= self.patience:
+                print(f"🛑 Early stopping triggered after {self.patience} epochs without improvement")
+                return True
+
+            return False
+    
+    def train(self):
+        """
+        Train the SAE models to assign specific latents to concepts.
+        Updated to work with the paper's SAE architecture (Sigmoid + TopK).
+        
+        LOSS COMPONENTS:
+        1. Reconstruction loss: (x̂ - x)² / x²
+        2. BCE loss: Applied to sigmoid-activated latents f = Sigmoid(TopK(h))
+        """
+        # Create save directory
+        if self.rank == 0:
+            if not os.path.exists(self.save_dir):
+                os.makedirs(self.save_dir)
+
+        # Process each SAE model
+        for hook_name, sae in self.saes.items():
+            if self.rank == 0:
+                print(f"\nTraining SAE model for {hook_name}")
+                if self.resume and self.start_epoch > 1:
+                    print(f"Resuming training from epoch {self.start_epoch}")
+
+            # Assign concepts to latents
+            if self.rank == 0:
+                object_to_latent, style_to_latent = self.assign_concepts_to_latents_from_scores(hook_name)
+                self.object_to_latent[hook_name] = object_to_latent
+                self.style_to_latent[hook_name] = style_to_latent
+                self.print_initial_concept_assignments(object_to_latent, style_to_latent, hook_name)
+
+                if self.world_size > 1:
+                    # Broadcast mappings
+                    object_list = [self.object_to_latent[hook_name]]
+                    style_list = [self.style_to_latent[hook_name]]
+                    dist.broadcast_object_list(object_list, src=0)
+                    dist.broadcast_object_list(style_list, src=0)
+            else:
+                # Other ranks receive mappings
+                object_list = [None]
+                style_list = [None]
+                dist.broadcast_object_list(object_list, src=0)
+                dist.broadcast_object_list(style_list, src=0)
+                self.object_to_latent[hook_name] = object_list[0]
+                self.style_to_latent[hook_name] = style_list[0]
+            
+            if self.world_size > 1:
+                dist.barrier()
+            
+            # Compute initial losses
+            if self.rank == 0 and self.start_epoch == 1:
+                train_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=False)
+                val_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=True)
+                
+                print("\n=== Initial Losses ===")
+                print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
+                print(f"  Validation - Total: {val_losses['total_loss']:.6f}, Recon: {val_losses['recon_loss']:.6f}, CE: {val_losses['ce_loss']:.6f}")
+                
+                if WANDB_AVAILABLE:
+                    initial_metrics = {
+                        f"{hook_name}/initial/train/total_loss": train_losses['total_loss'],
+                        f"{hook_name}/initial/train/recon_loss": train_losses['recon_loss'],
+                        f"{hook_name}/initial/train/ce_loss": train_losses['ce_loss'],
+                        f"{hook_name}/initial/val/total_loss": val_losses['total_loss'],
+                        f"{hook_name}/initial/val/recon_loss": val_losses['recon_loss'],
+                        f"{hook_name}/initial/val/ce_loss": val_losses['ce_loss'],
+                    }
+                    wandb.log(initial_metrics)
+        
+            # Training loop
+            for epoch in range(self.start_epoch, self.num_epochs + 1):
+                if self.rank == 0:
+                    print(f"\nEpoch {epoch}/{self.num_epochs}")
+                    print(f"Training {hook_name}...")
+
+                sae.train()
+                optimizer = self.optimizers[hook_name]
+                
+                object_to_latent = self.object_to_latent[hook_name]
+                style_to_latent = self.style_to_latent[hook_name]
+                
+                # Set epoch for sampler
+                if self.world_size > 1 and hasattr(self.train_loader.sampler, 'set_epoch'):
+                    self.train_loader.sampler.set_epoch(epoch)
+                
+                # Track losses
+                total_loss_sum = 0.0
+                recon_loss_sum = 0.0
+                ce_loss_sum = 0.0
+                num_batches = 0
+                
+                data_iter = self.train_loader
+                if self.rank == 0:
+                    data_iter = tqdm(data_iter, desc="Batches")
+
+                # Training loop
+                for batch_idx, (activations, object_labels, style_labels) in enumerate(data_iter):
+                    if batch_idx % 10 == 0:
+                        torch.cuda.empty_cache()
+                    
+                    activations = activations.to(self.device)
+
+                    # Mixed precision or standard training
+                    if self.mixed_precision and torch.cuda.is_available() and not self.use_float16:
+                        with torch.amp.autocast('cuda'):
+                            recon_loss, top_acts, top_indices = self.compute_reconstruction_loss(sae, activations)
+                            
+                            if top_acts is None or top_indices is None:
+                                continue
+
+                            ce_loss = self.compute_cross_entropy_loss(
+                                top_acts, top_indices,
+                                object_labels, style_labels,
+                                object_to_latent, style_to_latent
+                            )
+
+                            total_loss = (
+                                self.reconstruction_weight * recon_loss +
+                                self.cross_entropy_weight * ce_loss
+                            )
+                        
+                        optimizer.zero_grad()
+                        self.scaler.scale(total_loss).backward()
+                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                            self.scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
+                            self.scaler.step(optimizer)
+                            self.scaler.update()
+                            optimizer.zero_grad(set_to_none=True)
+                    else:
+                        # Standard precision
+                        recon_loss, top_acts, top_indices = self.compute_reconstruction_loss(sae, activations)
+                        
+                        if top_acts is None or top_indices is None:
+                            continue
+
+                        ce_loss = self.compute_cross_entropy_loss(
+                            top_acts, top_indices,
+                            object_labels, style_labels,
+                            object_to_latent, style_to_latent
+                        )
+
+                        total_loss = (
+                            self.reconstruction_weight * recon_loss +
+                            self.cross_entropy_weight * ce_loss
+                        )
+                        
+                        optimizer.zero_grad()
+
+                        if torch.isnan(total_loss).any():
+                            print(f"WARNING: NaN detected in loss, skipping backward")
+                            continue
+                        
+                        total_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
+
+                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                            optimizer.step()
+                            optimizer.zero_grad(set_to_none=True)
+                    
+                    # Accumulate losses
+                    total_loss_sum += total_loss.item()
+                    recon_loss_sum += recon_loss.item()
+                    ce_loss_sum += ce_loss.item()
+                    num_batches += 1
+
+                    # Cleanup
+                    del recon_loss, ce_loss, total_loss, top_acts, top_indices
+
+                    if batch_idx % 50 == 0:
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                
+                # Synchronize losses across processes
+                if self.world_size > 1:
+                    loss_tensor = torch.tensor(
+                        [total_loss_sum, recon_loss_sum, ce_loss_sum, num_batches],
+                        dtype=torch.float32, device=self.device
+                    )
+                    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+                    total_loss_sum = loss_tensor[0].item()
+                    recon_loss_sum = loss_tensor[1].item()
+                    ce_loss_sum = loss_tensor[2].item()
+                    num_batches = int(loss_tensor[3].item())
+                
+                if num_batches > 0:
+                    avg_total_loss = total_loss_sum / num_batches
+                    avg_recon_loss = recon_loss_sum / num_batches
+                    avg_ce_loss = ce_loss_sum / num_batches
+                else:
+                    print(f"WARNING: No batches processed in epoch {epoch}")
+                    continue
+                
+                # Evaluation and logging (rank 0 only)
+                if self.rank == 0:
+                    print(f"\nEpoch {epoch} Training Averages:")
+                    print(f"  Total Loss: {avg_total_loss:.6f}")
+                    print(f"  Recon Loss: {avg_recon_loss:.6f}")
+                    print(f"  CE Loss: {avg_ce_loss:.6f}")
+                    
+                    # Evaluate
+                    train_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=False)
+                    val_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=True)
+                    
+                    print(f"\n=== End of Epoch {epoch} Losses ===")
+                    print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
+                    print(f"  Validation - Total: {val_losses['total_loss']:.6f}, Recon: {val_losses['recon_loss']:.6f}, CE: {val_losses['ce_loss']:.6f}")
+                    
+                    # Early stopping
+                    should_stop = self.check_early_stopping(val_losses['total_loss'], epoch, sae, hook_name, optimizer)
+
+                    # Save current checkpoint
+                    if isinstance(sae, DDP):
+                        self.save_current_checkpoint(sae.module, hook_name, epoch, optimizer)
+                    else:
+                        self.save_current_checkpoint(sae, hook_name, epoch, optimizer)
+
+                    if should_stop:
+                        print(f"🛑 Early stopping triggered at epoch {epoch}")
+                        break
+                    
+                    # Distribution statistics
+                    train_distributions = self.get_latent_distribution_statistics(
+                        sae if not isinstance(sae, DDP) else sae.module,
+                        self.train_loader,
+                        object_to_latent,
+                        style_to_latent
+                    )
+                    val_distributions = self.get_latent_distribution_statistics(
+                        sae if not isinstance(sae, DDP) else sae.module,
+                        self.val_loader,
+                        object_to_latent,
+                        style_to_latent
+                    )
+                    
+                    self.print_latent_distribution_summary(
+                        train_distributions, object_to_latent, style_to_latent,
+                        epoch=epoch, is_validation=False
+                    )
+                    self.print_latent_distribution_summary(
+                        val_distributions, object_to_latent, style_to_latent,
+                        epoch=epoch, is_validation=True
+                    )
+                    
+                    # Wandb logging
+                    if WANDB_AVAILABLE:
+                        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
+                        
+                        metrics = {
+                            f"{hook_name}/train/total_loss": train_losses['total_loss'],
+                            f"{hook_name}/train/recon_loss": train_losses['recon_loss'],
+                            f"{hook_name}/train/ce_loss": train_losses['ce_loss'],
+                            f"{hook_name}/val/total_loss": val_losses['total_loss'],
+                            f"{hook_name}/val/recon_loss": val_losses['recon_loss'],
+                            f"{hook_name}/val/ce_loss": val_losses['ce_loss'],
+                            f"{hook_name}/best_val_loss": self.best_val_loss,
+                            f"{hook_name}/patience_counter": self.patience_counter,
+                            "epoch": epoch
+                        }
+                        
+                        # Success rates
+                        train_success = sum(1 for c, s in train_distributions.items() 
+                                           if combined_concept_to_latent.get(c) == s["dominant_latent"])
+                        train_success_rate = train_success / len(train_distributions) if train_distributions else 0
+    
+                        val_success = sum(1 for c, s in val_distributions.items() 
+                                         if combined_concept_to_latent.get(c) == s["dominant_latent"])
+                        val_success_rate = val_success / len(val_distributions) if val_distributions else 0
+    
+                        metrics.update({
+                            f"{hook_name}/train/concept_success_rate": train_success_rate,
+                            f"{hook_name}/val/concept_success_rate": val_success_rate,
+                        })
+                        
+                        wandb.log(metrics)
+                    
+                    # Print epoch summary
+                    self.print_epoch_summary(
+                        epoch, hook_name, train_losses, val_losses,
+                        train_distributions, val_distributions, object_to_latent, style_to_latent
+                    )
+                    
+                    if should_stop:
+                        break
+                
+                # Synchronize processes
+                if self.world_size > 1:
+                    dist.barrier()
+        
+        if self.rank == 0:
+            if hasattr(self, 'best_val_loss') and self.best_val_loss != float('inf'):
+                print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.6f}")
+            else:
+                print("\nTraining completed successfully!")
 
     def _create_sae_from_scratch(self, hook_name):
         """Create a new SAE model from scratch."""
@@ -1106,40 +1701,33 @@ class SAEConceptLatentOptimizer:
         """Load SAE models from checkpoint with resume functionality or create from scratch."""
         print(f"Loading SAE models from {self.checkpoint_path}")
         
-        # Check if we should resume from a saved checkpoint
         if self.resume:
             print("Resume mode enabled - looking for latest checkpoints...")
         
-        # Check if the checkpoint path itself contains an SAE model
+        # Check if checkpoint path contains an SAE model
         if (self.checkpoint_path / "cfg.json").exists() and (self.checkpoint_path / "sae.safetensors").exists():
             hook_name = self.checkpoint_path.name
             
-            # Handle from_scratch mode
             if self.from_scratch:
                 print(f"Creating SAE from scratch for {hook_name}")
                 self._create_sae_from_scratch(hook_name)
                 
-                # Try to resume training state if resume=True
                 if self.resume:
                     latest_epoch, latest_checkpoint_path = self.find_latest_checkpoint(hook_name)
                     if latest_epoch is not None:
                         print(f"Loading training state from epoch {latest_epoch}")
                         if self.load_checkpoint_state(hook_name, latest_checkpoint_path):
                             self.start_epoch = latest_epoch + 1
-                            print(f"Will resume training from epoch {self.start_epoch}")
                 return
             
-            # Normal loading or resume logic
+            # Normal loading or resume
             if self.resume:
                 latest_epoch, latest_checkpoint_path = self.find_latest_checkpoint(hook_name)
                 if latest_epoch is not None:
                     print(f"Found checkpoint for {hook_name} at epoch {latest_epoch}")
                     if self.load_checkpoint_state(hook_name, latest_checkpoint_path):
                         self.start_epoch = latest_epoch + 1
-                        print(f"Will resume training from epoch {self.start_epoch}")
                         return
-                    else:
-                        print(f"Failed to load checkpoint, falling back to original model")
             
             # Load original model
             try:
@@ -1147,7 +1735,6 @@ class SAEConceptLatentOptimizer:
                 sae = sae.to(dtype=self.dtype)
                 self.saes[hook_name] = sae
                 
-                # Create optimizer
                 self.optimizers[hook_name] = Adam(
                     [{"params": sae.parameters(), "lr": self.lr}],
                     eps=1e-8
@@ -1162,32 +1749,24 @@ class SAEConceptLatentOptimizer:
                 if hook_dir.is_dir():
                     hook_name = hook_dir.name
                     
-                    # Handle from_scratch mode
                     if self.from_scratch:
                         print(f"Creating SAE from scratch for {hook_name}")
                         self._create_sae_from_scratch(hook_name)
                         
-                        # Try to resume training state if resume=True
                         if self.resume:
                             latest_epoch, latest_checkpoint_path = self.find_latest_checkpoint(hook_name)
                             if latest_epoch is not None:
                                 print(f"Loading training state from epoch {latest_epoch}")
                                 if self.load_checkpoint_state(hook_name, latest_checkpoint_path):
                                     self.start_epoch = max(self.start_epoch, latest_epoch + 1)
-                                    print(f"Will resume training from epoch {self.start_epoch}")
                         continue
                     
-                    # Normal loading or resume logic for this hook
                     if self.resume:
                         latest_epoch, latest_checkpoint_path = self.find_latest_checkpoint(hook_name)
                         if latest_epoch is not None:
-                            print(f"Found checkpoint for {hook_name} at epoch {latest_epoch}")
                             if self.load_checkpoint_state(hook_name, latest_checkpoint_path):
                                 self.start_epoch = max(self.start_epoch, latest_epoch + 1)
-                                print(f"Will resume training from epoch {self.start_epoch}")
                                 continue
-                            else:
-                                print(f"Failed to load checkpoint, falling back to original model")
                     
                     # Load original model
                     try:
@@ -1195,7 +1774,6 @@ class SAEConceptLatentOptimizer:
                         sae = sae.to(dtype=self.dtype)
                         self.saes[hook_name] = sae
                         
-                        # Create optimizer
                         self.optimizers[hook_name] = Adam(
                             [{"params": sae.parameters(), "lr": self.lr}],
                             eps=1e-8
@@ -1206,27 +1784,24 @@ class SAEConceptLatentOptimizer:
     
     def initialize_wandb(self):
         """Initialize weights and biases for logging in offline mode."""
-        if WANDB_AVAILABLE:
-            # Create directory for wandb logs
+        # Only initialize wandb on rank 0 to avoid conflicts in distributed training
+        if WANDB_AVAILABLE and self.rank == 0:
             wandb_dir = os.path.join(self.save_dir, "wandb")
             os.makedirs(wandb_dir, exist_ok=True)
-            
-            # Set environment variable to run wandb in offline mode
+
             os.environ["WANDB_MODE"] = "offline"
             os.environ["WANDB_DIR"] = wandb_dir
-            
-            # Create a simple run name
+
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = f"sae_dual_concept_optimization_{timestamp}"
-            
+
             config = {
                 "learning_rate": self.lr,
                 "num_epochs": self.num_epochs,
                 "batch_size": self.batch_size,
                 "reconstruction_weight": self.reconstruction_weight,
                 "cross_entropy_weight": self.cross_entropy_weight,
-                "sparsity_weight": self.sparsity_weight,
                 "seed": self.seed,
                 "validation_split": self.validation_split,
                 "mixed_batches": self.mixed_batches,
@@ -1237,688 +1812,23 @@ class SAEConceptLatentOptimizer:
                 "start_epoch": self.start_epoch,
                 "from_scratch": self.from_scratch,
             }
-            
-            wandb.init(
-                project="sae_dual_concept_latent_optimizer",
-                name=run_name,
-                config=config,
-                dir=wandb_dir
-            )
-            
-            print(f"Initialized wandb logging in OFFLINE mode")
-            print(f"Logs will be stored in: {wandb_dir}")
 
-    def compute_reconstruction_loss(self, sae, activations):
-        """Fixed reconstruction loss that handles tensor dimensions correctly."""
-        # Get the actual model
-        model = sae.module if hasattr(sae, 'module') else sae
+            try:
+                wandb.init(
+                    project="sae_dual_concept_latent_optimizer",
+                    name=run_name,
+                    config=config,
+                    dir=wandb_dir,
+                    settings=wandb.Settings(_service_wait=60)  # Increase timeout
+                )
 
-        # Ensure activations are 2D [batch_size, features]
-        if len(activations.shape) == 3:
-            # If 3D [batch, time, features], flatten first two dimensions
-            batch_size, time_steps, features = activations.shape
-            activations = activations.reshape(batch_size * time_steps, features)
-        elif len(activations.shape) == 4:
-            # If 4D [batch, time, height, width], flatten spatial dimensions
-            batch_size, time_steps, height, width = activations.shape
-            activations = activations.reshape(batch_size * time_steps, height * width)
-
-        if len(activations.shape) != 2:
-            print(f"  Recon Error: Cannot handle activations shape: {activations.shape}")
-            return torch.tensor(1.0, device=self.device, dtype=self.dtype), torch.zeros(activations.shape[0], 1000, device=self.device)
-
-        try:
-            # Get pre-activations
-            pre_acts = model.pre_acts(activations)
-
-            # Check for NaN
-            if torch.isnan(pre_acts).any():
-                print(f"  Recon Warning: NaN in pre_acts")
-                return torch.tensor(1.0, device=self.device, dtype=self.dtype), torch.zeros_like(pre_acts)
-
-            # Get top-k activations
-            top_acts, top_indices = model.select_topk(pre_acts)
-
-            # Decode and compute reconstruction loss
-            reconstructed = model.decode(top_acts, top_indices)
-
-            # Ensure shapes match for loss computation
-            if reconstructed.shape != activations.shape:
-                print(f"  Recon Error: Shape mismatch - reconstructed: {reconstructed.shape}, original: {activations.shape}")
-                return torch.tensor(1.0, device=self.device, dtype=self.dtype), pre_acts
-
-            loss = F.mse_loss(reconstructed, activations)
-
-            # Check for NaN
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"  Recon Warning: NaN/Inf in loss")
-                return torch.tensor(1.0, device=self.device, dtype=self.dtype), pre_acts
-
-            print(f"  Recon Loss: {loss.item():.6f}")
-            return loss, pre_acts
-
-        except Exception as e:
-            print(f"  Recon Error: {e}")
-            print(f"    Input shape: {activations.shape}")
-            import traceback
-            traceback.print_exc()
-            return torch.tensor(1.0, device=self.device, dtype=self.dtype), torch.zeros(activations.shape[0], 1000, device=self.device)
-
-    def compute_cross_entropy_loss(self, pre_acts, object_labels, style_labels, object_to_latent, style_to_latent, original_batch_size=None):
-        """
-        Enhanced cross-entropy loss: Binary CE + Across-batch orthogonality constraint.
-        
-        The orthogonality constraint ensures that object and style latent activations
-        are uncorrelated across the batch, preventing information leakage between
-        object and style representations.
-        """
-#         print(f"  CE Loss Debug: pre_acts shape = {pre_acts.shape}")
-#         print(f"  CE Loss Debug: num objects = {len(object_labels)}, num styles = {len(style_labels)}")
-    
-        # Handle the case where pre_acts were reshaped from [batch, seq, features] to [batch*seq, features]
-        if len(pre_acts.shape) == 2:
-            batch_times_seq, num_latents = pre_acts.shape
-            batch_size = len(object_labels)
-    
-            # Check if we need to reshape back
-            if batch_times_seq != batch_size:
-                # Calculate sequence length
-                seq_length = batch_times_seq // batch_size
-                if batch_times_seq == batch_size * seq_length:
-                    # Reshape back to [batch, seq, latents]
-                    pre_acts = pre_acts.view(batch_size, seq_length, num_latents)
-                    # Take mean over sequence dimension
-                    pre_acts = pre_acts.mean(dim=1)  # [batch, latents]
-                else:
-                    print(f"  CE Loss Error: Cannot reshape {batch_times_seq} to match batch size {batch_size}")
-                    return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-    
-        elif len(pre_acts.shape) == 3:
-            # If 3D [batch, seq, latents], take mean over sequence
-            pre_acts = pre_acts.mean(dim=1)
-    
-        if len(pre_acts.shape) != 2:
-            print(f"  CE Loss Error: Unexpected pre_acts shape: {pre_acts.shape}")
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-    
-        batch_size, num_latents = pre_acts.shape
-    
-        # Ensure batch size matches
-        if batch_size != len(object_labels) or batch_size != len(style_labels):
-            print(f"  CE Loss Error: Batch size mismatch")
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-    
-        # Create target tensor for all samples
-        target_mask = torch.zeros(batch_size, num_latents, device=self.device, dtype=torch.float32)
-        
-        valid_samples = 0
-        
-        for i, (object_concept, style_concept) in enumerate(zip(object_labels, style_labels)):
-            has_targets = False
-            
-            # Set object target if available
-            if object_concept in object_to_latent:
-                object_latent = object_to_latent[object_concept]
-                if 0 <= object_latent < num_latents:
-                    target_mask[i, object_latent] = 1.0
-                    has_targets = True
-            
-            # Set style target if available and not "none"
-            if style_concept != "none" and style_concept in style_to_latent:
-                style_latent = style_to_latent[style_concept]
-                if 0 <= style_latent < num_latents:
-                    target_mask[i, style_latent] = 1.0
-                    has_targets = True
-            
-            if has_targets:
-                valid_samples += 1
-    
-        if valid_samples == 0:
-            print(f"  CE Loss: No valid targets found")
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-    
-        # Binary cross-entropy with logits
-        bce_loss = F.binary_cross_entropy_with_logits(pre_acts, target_mask, reduction='none')
-        
-        # Only compute loss for samples and latents that have targets
-        valid_mask = target_mask > 0
-        
-        if valid_mask.sum() == 0:
-            print(f"  CE Loss: No valid target positions")
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-        
-        # Average loss only over valid target positions
-        ce_loss = bce_loss[valid_mask].mean()
-        
-        # Across-batch orthogonality constraint
-        orthogonality_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-        
-        # Get unique object and style latent indices
-        object_latent_indices = sorted(list(set(object_to_latent.values())))
-        style_latent_indices = sorted(list(set(style_to_latent.values())))
-        
-        if len(object_latent_indices) > 0 and len(style_latent_indices) > 0 and batch_size > 1:
-            # print(f"  Computing orthogonality: {len(object_latent_indices)} object latents vs {len(style_latent_indices)} style latents")
-            
-            # For each object latent and each style latent, compute correlation across the batch
-            total_squared_correlation = 0.0
-            num_correlations = 0
-            
-            for obj_latent_idx in object_latent_indices:
-                for style_latent_idx in style_latent_indices:
-                    # Get activation vectors across the batch for these two latents
-                    obj_activations = pre_acts[:, obj_latent_idx]    # [batch_size] - object latent across batch
-                    style_activations = pre_acts[:, style_latent_idx] # [batch_size] - style latent across batch
-                    
-                    # Compute Pearson correlation coefficient between these two vectors
-                    obj_mean = obj_activations.mean()
-                    style_mean = style_activations.mean()
-                    
-                    # Center the activations
-                    obj_centered = obj_activations - obj_mean
-                    style_centered = style_activations - style_mean
-                    
-                    # Compute correlation
-                    numerator = torch.sum(obj_centered * style_centered)
-                    obj_std = torch.sqrt(torch.sum(obj_centered ** 2) + 1e-8)
-                    style_std = torch.sqrt(torch.sum(style_centered ** 2) + 1e-8)
-                    
-                    correlation = numerator / (obj_std * style_std)
-                    
-                    # Add squared correlation (penalize both positive and negative correlations)
-                    total_squared_correlation += correlation ** 2
-                    num_correlations += 1
-                    
-                    # if num_correlations <= 3:  # Print first few for debugging
-                    #     print(f"    Corr(obj_latent_{obj_latent_idx}, style_latent_{style_latent_idx}) = {correlation.item():.4f}")
-            
-            if num_correlations > 0:
-                orthogonality_loss = total_squared_correlation / num_correlations
-                # print(f"  Average squared correlation: {orthogonality_loss.item():.6f}")
-            else:
-                print(f"  No correlations computed")
-        else:
-            print(f"  Skipping orthogonality (insufficient latents or batch size)")
-        
-        # Combine losses
-        orthogonality_weight = 0.1  # You can tune this weight
-        total_loss = ce_loss + orthogonality_weight * orthogonality_loss
-        
-#         print(f"  CE Loss components:")
-#         print(f"    Binary CE: {ce_loss.item():.6f}")
-#         print(f"    Orthogonality: {orthogonality_loss.item():.6f} (weight: {orthogonality_weight})")
-#         print(f"  Final CE Loss: {total_loss.item():.6f} (from {valid_samples} samples, {valid_mask.sum().item()} target latents)")
-        
-        return total_loss
-    
-    def compute_sparsity_loss(self, pre_acts):
-        """
-        Compute L1 sparsity regularization on pre-activations.
-
-        Args:
-            pre_acts: Pre-activations from the SAE
-
-        Returns:
-            loss: The sparsity loss
-        """
-        # Check for NaN values
-        if torch.isnan(pre_acts).any():
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-
-        # Clip extremely large values to prevent overflow
-        clipped_pre_acts = torch.clamp(pre_acts, -100, 100)
-
-        # Use a more stable formulation
-        sparsity = torch.mean(torch.abs(clipped_pre_acts))
-
-        # Prevent NaN return
-        if torch.isnan(sparsity) or torch.isinf(sparsity):
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-
-        return sparsity
-    
-    def evaluate_losses(self, sae, hook_name, object_to_latent, style_to_latent, is_validation=False):
-        """
-        Evaluate the losses for either training or validation set.
-        Fixed version with better memory management and progress tracking.
-        """
-        # Choose the appropriate loader
-        loader = self.val_loader if is_validation else self.train_loader
-
-        # Set model to evaluation mode
-        if hasattr(sae, 'module'):
-            sae.module.eval()
-        else:
-            sae.eval()
-
-        # Track losses
-        total_loss_sum = 0.0
-        recon_loss_sum = 0.0
-        ce_loss_sum = 0.0
-        sparsity_loss_sum = 0.0
-        num_batches = 0
-
-        # Evaluate on a limited number of batches for efficiency
-        max_batches = 5
-
-        dataset_type = "validation" if is_validation else "training"
-        print(f"Evaluating {dataset_type} losses for {hook_name}...")
-
-        # Evaluate
-        with torch.no_grad():
-            for batch_idx, (activations, object_labels, style_labels) in enumerate(loader):
-                if batch_idx >= max_batches:
-                    break
-                
-                # Print progress
-                print(f"  Processing batch {batch_idx + 1}/{max_batches}...")
-
-                try:
-                    activations = activations.to(self.device, dtype=self.dtype)
-
-                    # Compute losses
-                    recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-                    ce_loss = self.compute_cross_entropy_loss(pre_acts, object_labels, style_labels, object_to_latent, style_to_latent)
-                    sparsity_loss = self.compute_sparsity_loss(pre_acts)
-
-                    # Combined loss
-                    total_loss = (
-                        self.reconstruction_weight * recon_loss +
-                        self.cross_entropy_weight * ce_loss +
-                        self.sparsity_weight * sparsity_loss
-                    )
-
-                    # Accumulate losses
-                    total_loss_sum += total_loss.item()
-                    recon_loss_sum += recon_loss.item()
-                    ce_loss_sum += ce_loss.item()
-                    sparsity_loss_sum += sparsity_loss.item()
-                    num_batches += 1
-
-                except Exception as e:
-                    print(f"  Error in batch {batch_idx}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-                
-        # Calculate averages
-        if num_batches > 0:
-            avg_total_loss = total_loss_sum / num_batches
-            avg_recon_loss = recon_loss_sum / num_batches
-            avg_ce_loss = ce_loss_sum / num_batches
-            avg_sparsity_loss = sparsity_loss_sum / num_batches
-        else:
-            print(f"  WARNING: No batches processed for {dataset_type}")
-            avg_total_loss = avg_recon_loss = avg_ce_loss = avg_sparsity_loss = 0.0
-
-        print(f"  Completed {dataset_type} evaluation")
-
-        # Return losses
-        return {
-            "total_loss": avg_total_loss,
-            "recon_loss": avg_recon_loss,
-            "ce_loss": avg_ce_loss,
-            "sparsity_loss": avg_sparsity_loss
-        }
-
-    def check_early_stopping(self, val_loss, epoch, sae, hook_name, optimizer):
-        """Check early stopping and save best model when validation improves."""
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            self.patience_counter = 0
-            print(f"✅ New best validation loss: {self.best_val_loss:.6f}")
-
-            # Save the best model
-            if isinstance(sae, DDP):
-                self.save_best_model(sae.module, hook_name, epoch, optimizer)
-            else:
-                self.save_best_model(sae, hook_name, epoch, optimizer)
-
-            return False
-        else:
-            self.patience_counter += 1
-            print(f"⚠️  No improvement in validation loss. Patience: {self.patience_counter}/{self.patience}")
-
-            if self.patience_counter >= self.patience:
-                print(f"🛑 Early stopping triggered after {self.patience} epochs without improvement")
-                return True
-
-            return False
-    
-    def train(self):
-        """
-        Train the SAE models to assign specific latents to concepts using distributed training.
-        This method handles both single-GPU and multi-GPU (distributed) training.
-        Enhanced with dual object-style concept assignment, resume functionality and early stopping.
-        """
-        # Create save directory if it doesn't exist
-        if self.rank == 0:
-            if not os.path.exists(self.save_dir):
-                os.makedirs(self.save_dir)
-
-        # Process each SAE model
-        for hook_name, sae in self.saes.items():
-            if self.rank == 0:
-                print(f"\nTraining SAE model for {hook_name}")
-                if self.resume and self.start_epoch > 1:
-                    print(f"Resuming training from epoch {self.start_epoch}")
-
-            # Assign concepts to latents based on pre-computed scores (only on rank 0)
-            if self.rank == 0:
-                object_to_latent, style_to_latent = self.assign_concepts_to_latents_from_scores(hook_name)
-                self.object_to_latent[hook_name] = object_to_latent
-                self.style_to_latent[hook_name] = style_to_latent
-                self.print_initial_concept_assignments(object_to_latent, style_to_latent, hook_name)
-
-                if self.world_size > 1:
-                    # Broadcast mappings to all processes
-                    object_list = [self.object_to_latent[hook_name]]
-                    style_list = [self.style_to_latent[hook_name]]
-                    dist.broadcast_object_list(object_list, src=0)
-                    dist.broadcast_object_list(style_list, src=0)
-            else:
-                # Other ranks receive the mappings
-                object_list = [None]
-                style_list = [None]
-                dist.broadcast_object_list(object_list, src=0)
-                dist.broadcast_object_list(style_list, src=0)
-                self.object_to_latent[hook_name] = object_list[0]
-                self.style_to_latent[hook_name] = style_list[0]
-            
-            # Make sure all processes have the mappings before continuing
-            if self.world_size > 1:
-                dist.barrier()
-            
-            # Compute initial losses (only on rank 0 for logging purposes)
-            if self.rank == 0 and self.start_epoch == 1:
-                train_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=False)
-                val_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=True)
-                
-                print("\n=== Initial Losses ===")
-                print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
-                print(f"  Validation - Total: {val_losses['total_loss']:.6f}, Recon: {val_losses['recon_loss']:.6f}, CE: {val_losses['ce_loss']:.6f}")
-                
-                # Log initial metrics to wandb
-                if WANDB_AVAILABLE:
-                    initial_metrics = {
-                        f"{hook_name}/initial/train/total_loss": train_losses['total_loss'],
-                        f"{hook_name}/initial/train/recon_loss": train_losses['recon_loss'],
-                        f"{hook_name}/initial/train/ce_loss": train_losses['ce_loss'],
-                        f"{hook_name}/initial/val/total_loss": val_losses['total_loss'],
-                        f"{hook_name}/initial/val/recon_loss": val_losses['recon_loss'],
-                        f"{hook_name}/initial/val/ce_loss": val_losses['ce_loss'],
-                    }
-                    wandb.log(initial_metrics)
-        
-            # Training loop - start from self.start_epoch
-            for epoch in range(self.start_epoch, self.num_epochs + 1):
-                if self.rank == 0:
-                    print(f"\nEpoch {epoch}/{self.num_epochs}")
-                    print(f"Training {hook_name}...")
-
-                sae.train()
-                optimizer = self.optimizers[hook_name]
-                
-                # Get the concept-to-latent mappings for this hook
-                object_to_latent = self.object_to_latent[hook_name]
-                style_to_latent = self.style_to_latent[hook_name]
-                
-                # Set epoch for train sampler (for distributed training)
-                if self.world_size > 1 and hasattr(self.train_loader.sampler, 'set_epoch'):
-                    self.train_loader.sampler.set_epoch(epoch)
-                
-                # Track losses
-                total_loss_sum = 0.0
-                recon_loss_sum = 0.0
-                ce_loss_sum = 0.0
-                sparsity_loss_sum = 0.0
-                num_batches = 0
-                
-                data_iter = self.train_loader
-                if self.rank == 0:
-                    data_iter = tqdm(data_iter, desc="Batches")
-
-                # Process batches
-                for batch_idx, (activations, object_labels, style_labels) in enumerate(data_iter):
-                    if batch_idx % 10 == 0:
-                        torch.cuda.empty_cache()
-                    
-                    activations = activations.to(self.device)
-                    original_batch_size = activations.size(0)
-
-                    # Mixed precision training
-                    if self.mixed_precision and torch.cuda.is_available() and not self.use_float16:
-                        with torch.amp.autocast('cuda'):
-                            recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-
-                            # Cross-entropy loss for concept-specific latents
-                            ce_loss = self.compute_cross_entropy_loss(
-                                pre_acts, 
-                                object_labels, 
-                                style_labels,
-                                object_to_latent,
-                                style_to_latent,
-                                original_batch_size=original_batch_size
-                            )
-
-                            # Sparsity loss
-                            sparsity_loss = self.compute_sparsity_loss(pre_acts)
-
-                            # Combined loss
-                            total_loss = (
-                                self.reconstruction_weight * recon_loss +
-                                self.cross_entropy_weight * ce_loss +
-                                self.sparsity_weight * sparsity_loss
-                            )
-                        
-                        # Optimization step with mixed precision
-                        optimizer.zero_grad()
-                        self.scaler.scale(total_loss).backward()
-                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                            self.scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
-                            self.scaler.step(optimizer)
-                            self.scaler.update()
-                            optimizer.zero_grad(set_to_none=True)
-                    else:
-                        # Standard precision training
-                        recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-
-                        # Cross-entropy loss for concept-specific latents
-                        ce_loss = self.compute_cross_entropy_loss(
-                            pre_acts, 
-                            object_labels, 
-                            style_labels,
-                            object_to_latent,
-                            style_to_latent,
-                            original_batch_size=original_batch_size
-                        )
-
-                        # Sparsity loss
-                        sparsity_loss = self.compute_sparsity_loss(pre_acts)
-
-                        # Combined loss
-                        total_loss = (
-                            self.reconstruction_weight * recon_loss +
-                            self.cross_entropy_weight * ce_loss +
-                            self.sparsity_weight * sparsity_loss
-                        )
-                        
-                        optimizer.zero_grad()
-
-                        # Check for NaN in loss
-                        if torch.isnan(total_loss).any():
-                            print(f"WARNING: NaN detected in loss, skipping backward")
-                            continue
-                        
-                        total_loss.backward()
-
-                        # Gradient clipping to prevent explosion
-                        torch.nn.utils.clip_grad_norm_(sae.parameters() if not isinstance(sae, DDP) else sae.module.parameters(), 1.0)
-
-                        # Gradient accumulation
-                        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                            optimizer.step()
-                            optimizer.zero_grad(set_to_none=True)
-                    
-                    # Accumulate losses for logging
-                    total_loss_sum += total_loss.item()
-                    recon_loss_sum += recon_loss.item()
-                    ce_loss_sum += ce_loss.item()
-                    sparsity_loss_sum += sparsity_loss.item()
-                    num_batches += 1
-
-                    del recon_loss, ce_loss, sparsity_loss, total_loss
-
-                    if 'pre_acts' in locals():
-                        del pre_acts
-
-                    # Force garbage collection every 50 batches
-                    if batch_idx % 50 == 0:
-                        import gc
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                
-                # Synchronize loss statistics across processes (for distributed training)
-                if self.world_size > 1:
-                    # Create tensors with loss values
-                    loss_tensor = torch.tensor(
-                        [total_loss_sum, recon_loss_sum, ce_loss_sum, sparsity_loss_sum, num_batches],
-                        dtype=torch.float32, device=self.device
-                    )
-                    
-                    # All-reduce to get the sum across all processes
-                    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-                    
-                    # Unpack the reduced values
-                    total_loss_sum = loss_tensor[0].item()
-                    recon_loss_sum = loss_tensor[1].item()
-                    ce_loss_sum = loss_tensor[2].item()
-                    sparsity_loss_sum = loss_tensor[3].item()
-                    num_batches = int(loss_tensor[4].item())
-                
-                if num_batches > 0:
-                    avg_total_loss = total_loss_sum / num_batches
-                    avg_recon_loss = recon_loss_sum / num_batches
-                    avg_ce_loss = ce_loss_sum / num_batches
-                    avg_sparsity_loss = sparsity_loss_sum / num_batches
-                else:
-                    print(f"WARNING: No batches processed in epoch {epoch}")
-                    avg_total_loss = avg_recon_loss = avg_ce_loss = avg_sparsity_loss = 0.0
-                    continue  # Skip to next epoch
-                
-                # Print training statistics (only on rank 0)
-                if self.rank == 0:
-                    print(f"\nEpoch {epoch} Training Averages:")
-                    print(f"  Total Loss: {avg_total_loss:.6f}")
-                    print(f"  Recon Loss: {avg_recon_loss:.6f}")
-                    print(f"  CE Loss: {avg_ce_loss:.6f}")
-                    print(f"  Sparsity Loss: {avg_sparsity_loss:.6f}")
-                    
-                    # Evaluate on validation set
-                    train_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=False)
-                    val_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=True)
-                    
-                    print(f"\n=== End of Epoch {epoch} Losses ===")
-                    print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
-                    print(f"  Validation - Total: {val_losses['total_loss']:.6f}, Recon: {val_losses['recon_loss']:.6f}, CE: {val_losses['ce_loss']:.6f}")
-                    
-                    # Check for early stopping and save best model
-                    should_stop = self.check_early_stopping(val_losses['total_loss'], epoch, sae, hook_name, optimizer)
-
-                    # Always save current checkpoint for resume capability
-                    if isinstance(sae, DDP):
-                        self.save_current_checkpoint(sae.module, hook_name, epoch, optimizer)
-                    else:
-                        self.save_current_checkpoint(sae, hook_name, epoch, optimizer)
-
-                    # Check if we should stop early
-                    if should_stop:
-                        print(f"🛑 Early stopping triggered at epoch {epoch}")
-                        break
-                    
-                    # Calculate latent distribution statistics
-                    train_distributions = self.get_latent_distribution_statistics(
-                        sae if not isinstance(sae, DDP) else sae.module,
-                        self.train_loader,
-                        object_to_latent,
-                        style_to_latent
-                    )
-                    val_distributions = self.get_latent_distribution_statistics(
-                        sae if not isinstance(sae, DDP) else sae.module,
-                        self.val_loader,
-                        object_to_latent,
-                        style_to_latent
-                    )
-                    
-                    # Print distribution summaries
-                    self.print_latent_distribution_summary(
-                        train_distributions, 
-                        object_to_latent,
-                        style_to_latent,
-                        epoch=epoch, 
-                        is_validation=False
-                    )
-                    self.print_latent_distribution_summary(
-                        val_distributions, 
-                        object_to_latent,
-                        style_to_latent,
-                        epoch=epoch, 
-                        is_validation=True
-                    )
-                    
-                    # Log metrics to wandb
-                    if WANDB_AVAILABLE:
-                        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
-                        
-                        metrics = {
-                            f"{hook_name}/train/total_loss": train_losses['total_loss'],
-                            f"{hook_name}/train/recon_loss": train_losses['recon_loss'],
-                            f"{hook_name}/train/ce_loss": train_losses['ce_loss'],
-                            f"{hook_name}/val/total_loss": val_losses['total_loss'],
-                            f"{hook_name}/val/recon_loss": val_losses['recon_loss'],
-                            f"{hook_name}/val/ce_loss": val_losses['ce_loss'],
-                            f"{hook_name}/best_val_loss": self.best_val_loss,
-                            f"{hook_name}/patience_counter": self.patience_counter,
-                            "epoch": epoch
-                        }
-                        
-                        # Calculate and log success rates
-                        train_success = sum(1 for c, s in train_distributions.items() 
-                                           if combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        train_success_rate = train_success / len(train_distributions) if train_distributions else 0
-    
-                        val_success = sum(1 for c, s in val_distributions.items() 
-                                         if combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        val_success_rate = val_success / len(val_distributions) if val_distributions else 0
-    
-                        metrics.update({
-                            f"{hook_name}/train/concept_success_rate": train_success_rate,
-                            f"{hook_name}/val/concept_success_rate": val_success_rate,
-                        })
-                        
-                        wandb.log(metrics)
-                    
-                    # Print comprehensive epoch summary
-                    self.print_epoch_summary(
-                        epoch, hook_name, train_losses, val_losses,
-                        train_distributions, val_distributions, object_to_latent, style_to_latent
-                    )
-                    
-                    # Check if we should stop early
-                    if should_stop:
-                        print(f"🛑 Early stopping triggered at epoch {epoch}")
-                        break
-                
-                # Synchronize processes before starting the next epoch
-                if self.world_size > 1:
-                    dist.barrier()
-        
-        if self.rank == 0:
-            if hasattr(self, 'best_val_loss') and self.best_val_loss != float('inf'):
-                print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.6f}")
-            else:
-                print("\nTraining completed successfully!")
+                print(f"Initialized wandb logging in OFFLINE mode")
+                print(f"Logs will be stored in: {wandb_dir}")
+            except Exception as e:
+                print(f"Warning: Failed to initialize wandb: {e}")
+                print("Continuing without wandb logging...")
+        elif self.rank != 0:
+            print(f"Rank {self.rank}: Skipping wandb initialization (only rank 0 logs)")
 
 
 def run_distributed_training(rank, world_size, args):
@@ -1947,7 +1857,6 @@ def run_distributed_training(rank, world_size, args):
         num_epochs=args.num_epochs,
         reconstruction_weight=args.reconstruction_weight,
         cross_entropy_weight=args.cross_entropy_weight,
-        sparsity_weight=args.sparsity_weight,
         batch_size=args.batch_size,
         save_dir=args.save_dir,
         seed=args.seed,
@@ -1962,21 +1871,18 @@ def run_distributed_training(rank, world_size, args):
         from_scratch=args.from_scratch,
     )
 
-    # Update the SAE models to be DDP models
+    # Update SAE models to DDP
     for hook_name, sae in optimizer.saes.items():
-        # Move to device
         sae = sae.to(device)
-        # Wrap with DDP
         ddp_model = DDP(sae, device_ids=[rank])
         optimizer.saes[hook_name] = ddp_model
         
-        # Update optimizer to point to new model parameters
         optimizer.optimizers[hook_name] = Adam(
             [{"params": ddp_model.parameters(), "lr": optimizer.lr}],
             eps=1e-8
         )
 
-    # Train the models
+    # Train
     optimizer.train()
 
     # Cleanup
@@ -1985,6 +1891,10 @@ def run_distributed_training(rank, world_size, args):
 def main():
     """
     Main entry point for the SAE Dual Concept Latent Optimizer.
+    
+    LOSS CONFIGURATION:
+    - Reconstruction loss: (x̂ - x)² / x²
+    - BCE loss: Applied to sigmoid-activated latents f = Sigmoid(TopK(h))
     """
     parser = argparse.ArgumentParser(description="Optimize SAE models to assign specific latents to both object and style concepts.")
     
@@ -2033,7 +1943,6 @@ def main():
     # Loss weights
     parser.add_argument("--reconstruction_weight", type=float, default=1.0, help="Weight for reconstruction loss")
     parser.add_argument("--cross_entropy_weight", type=float, default=1.0, help="Weight for cross-entropy loss")
-    parser.add_argument("--sparsity_weight", type=float, default=0.01, help="Weight for sparsity regularization")
     
     # Save parameters
     parser.add_argument("--save_dir", type=str, default="sae-dual-concept-optimized", help="Directory to save optimized models")
@@ -2058,7 +1967,6 @@ def main():
         world_size = int(os.environ['WORLD_SIZE'])
         print(f"Running with torchrun: rank={rank}, world_size={world_size}")
     
-        # With torchrun, run the training function directly
         run_distributed_training(rank, world_size, args)
     
     else:
@@ -2070,7 +1978,7 @@ def main():
                 join=True
             )
         else:
-            # Create and run the optimizer with updated parameters
+            # Create and run the optimizer
             optimizer = SAEConceptLatentOptimizer(
                 checkpoint_path=args.checkpoint_path,
                 activations_dir=args.activations_dir,
@@ -2081,7 +1989,6 @@ def main():
                 num_epochs=args.num_epochs,
                 reconstruction_weight=args.reconstruction_weight,
                 cross_entropy_weight=args.cross_entropy_weight,
-                sparsity_weight=args.sparsity_weight,
                 batch_size=args.batch_size,
                 save_dir=args.save_dir,
                 seed=args.seed,

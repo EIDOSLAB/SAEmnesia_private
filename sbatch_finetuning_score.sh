@@ -170,7 +170,7 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --num_epochs 150 \
     --reconstruction_weight 1.0 \
     --score_weight 100.0 \
-    --batch_size 1024 \
+    --batch_size 512 \
     --save_dir ${SAVE_DIR} \
     --seed 42 \
     --validation_split 0.2 \
