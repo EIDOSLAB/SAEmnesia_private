@@ -171,7 +171,7 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --learning_rate 5e-6 \
     --num_epochs 150 \
     --reconstruction_weight 1.0 \
-    --cross_entropy_weight 0 \
+    --cross_entropy_weight 3.0 \
     --sparsity_weight 0.01 \
     --batch_size 128 \
     --save_dir ${SAVE_DIR} \
