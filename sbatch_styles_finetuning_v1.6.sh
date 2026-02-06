@@ -2,23 +2,23 @@
 #SBATCH --job-name=style_v1.6_ft
 #SBATCH --output=sbatch_output/%j_style_fine_tuning-v1.6.out
 #SBATCH --error=sbatch_output/%j_style_fine_tuning_v1.6.err
-#SBATCH --account=IscrC_SAOU
+#SBATCH --account=IscrC_INSAIT
 #SBATCH --time=24:00:00
-#SBATCH --mem=300G
+#SBATCH --mem=380G
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
 
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Use a location with more disk space - typically /leonardo_work has more quota than /leonardo_scratch/fast
-LARGE_CACHE_BASE="/leonardo_work/IscrC_MAGNIFY/cassano/temp_cache"
+# Use a location with more disk space
+LARGE_CACHE_BASE="/leonardo_work/IscrC_INSAIT/cassano/temp_cache"
 
 # Increase NCCL timeout and add debugging
 export NCCL_BLOCKING_WAIT=1
-export NCCL_TIMEOUT=1800  # 30 minutes
+export NCCL_TIMEOUT=3000  # 30 minutes
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=ALL
 
@@ -37,6 +37,10 @@ export HF_DATASETS_DOWNLOADED_DATASETS_PATH="${LARGE_CACHE_BASE}/hf_datasets/dow
 export HF_HOME="${LARGE_CACHE_BASE}/hf_home"
 export TRANSFORMERS_CACHE="${LARGE_CACHE_BASE}/transformers"
 export HF_HUB_CACHE="${LARGE_CACHE_BASE}/hf_hub"
+
+# CHANGED: Remove HF_DATASETS_OFFLINE - it breaks operations
+# export HF_DATASETS_OFFLINE=1  # <-- COMMENTED OUT
+export HF_DATASETS_IN_MEMORY_MAX_SIZE=0  # <-- ADDED: Force streaming/memory-mapped mode
 
 # Torch and PyTorch caches
 export TORCH_HOME="${LARGE_CACHE_BASE}/torch"
@@ -84,9 +88,9 @@ find ${LARGE_CACHE_BASE} -name "*partial*" -delete 2>/dev/null || true
 # Check available disk space in both locations
 echo "Checking disk space:"
 echo "Source data location:"
-df -h /leonardo_work/IscrC_SAOU/
+df -h /leonardo_work/IscrC_INSAIT/
 echo "Temporary files location:"
-df -h /leonardo_work/IscrC_SAOU/
+df -h /leonardo_work/IscrC_INSAIT/
 
 # Name of the STYLE-FOCUSED Python script
 SCRIPT_NAME="/leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/sae_styles_finetuning_v1.6.py"
@@ -96,14 +100,14 @@ CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/be
 
 # Directory containing STYLE-FOCUSED concept activations WITH STYLE RECOVERY METADATA
 # This should contain the recovered_object_to_style_index.json file in metadata/
-ACTIVATIONS_DIR="/leonardo_work/IscrC_SAOU/styles_finetuning_dataset"
+ACTIVATIONS_DIR="/leonardo_work/IscrC_INSAIT/styles_finetuning_dataset"
 
 # JSON file paths for SEPARATE object and style scores - for up.1.2 block
 OBJECT_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/objects/up_1_2/scores.json"
 STYLE_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/styles/up_1_2/scores.json"
 
 # Directory to save models and logs - STYLE-FOCUSED
-SAVE_DIR="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/style_optimized/v1.6/ce_weight_2.0_style_sep_1.5_sparsity_0.01"
+SAVE_DIR="/leonardo_work/IscrC_INSAIT/cassano/saeuron/sae_checkpoints/style_optimized/v1.6/ce_weight_2.0_style_sep_1.5_sparsity_0.01"
 
 # Make sure directories exist
 mkdir -p ${SAVE_DIR}
@@ -171,7 +175,7 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --reconstruction_weight 1.0 \
     --cross_entropy_weight 2.0 \
     --sparsity_weight 0.01 \
-    --batch_size 128 \
+    --batch_size 64 \
     --save_dir ${SAVE_DIR} \
     --seed 42 \
     --validation_split 0.2 \
@@ -202,7 +206,7 @@ find ${LARGE_CACHE_BASE} -name "*.lock" -delete 2>/dev/null || true
 echo "Job completed at $(date)"
 echo "Results have been saved to: ${SAVE_DIR}"
 echo "Final disk usage:"
-df -h /leonardo_work/IscrC_SAOU/
+df -h /leonardo_work/IscrC_INSAIT/
 
 # Print summary of what was trained
 echo ""

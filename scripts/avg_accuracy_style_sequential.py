@@ -4,6 +4,10 @@ import fire
 import numpy as np
 import torch
 from tqdm import tqdm
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.dirname(SCRIPT_DIR))
 
 from UnlearnCanvas_resources.const import class_available, theme_available
 

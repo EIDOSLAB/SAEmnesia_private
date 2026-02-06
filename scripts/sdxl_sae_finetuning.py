@@ -7,27 +7,11 @@ This script processes raw activations from different concepts, assigns specific 
 to each concept based on pre-computed scores from JSON files, and finetunes the SAE to maintain 
 this assignment through cross-entropy loss.
 
-STYLE-FOCUSED VERSION: Optimized for style unlearning on up.1.2 block activations.
-Prioritizes styles over objects in latent assignments.
+Enhanced version that handles both objects and styles with separate latent assignments.
+Added from-scratch training capability.
 """
 import os
 import sys
-
-# Prevent HuggingFace from loading massive datasets into memory
-os.environ['HF_DATASETS_IN_MEMORY_MAX_SIZE'] = '0'
-
-# Remove offline mode if it was set (allows cache operations)
-if 'HF_DATASETS_OFFLINE' in os.environ:
-    del os.environ['HF_DATASETS_OFFLINE']
-
-# Configure datasets library settings
-try:
-    from datasets import config
-    config.IN_MEMORY_MAX_SIZE = 0  # Force memory-mapped mode
-    config.MAX_SHARD_SIZE = "500MB"  # Smaller shards to reduce memory pressure
-except ImportError:
-    pass  # Will be imported later
-
 import json
 import glob
 
@@ -60,20 +44,12 @@ from datasets import Dataset as HFDataset, concatenate_datasets, load_from_disk
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=torch.float32, max_samples_per_style=None):
+def load_datasets_from_category_dirs(base_dirs, hookpoint, dtype=torch.float32):
     """
-    Load datasets with style recovery - uses HuggingFace's native loader.
-    Compatible with datasets created by fine_tuning_cache_activations_runner_unlearn_canvas.py
+    Load datasets from concept directories with object labels only.
     """
-    from datasets import Dataset as HFDataset, concatenate_datasets
-    
-    print(f"Loading datasets with recovered styles from {base_dirs} for hookpoint {hookpoint}")
-    if max_samples_per_style:
-        print(f"  Limiting to {max_samples_per_style} samples per style")
-    sys.stdout.flush()
-
-    all_datasets = []
-    total_samples_loaded = 0
+    datasets = []
+    print(f"Loading datasets from {base_dirs} for hookpoint {hookpoint}")
 
     for base_dir in base_dirs:
         base_path = Path(base_dir)
@@ -83,164 +59,72 @@ def load_datasets_from_category_dirs_with_styles(base_dirs, hookpoint, dtype=tor
             print(f"❌ Hookpoint directory does not exist: {hookpoint_dir}")
             continue
         
-        # Load metadata
-        metadata_path = hookpoint_dir / "metadata" / "recovered_object_to_style_index.json"
-        if not metadata_path.exists():
-            print(f"❌ No recovered metadata found at {metadata_path}")
-            continue
-        
-        with open(metadata_path, 'r') as f:
-            object_style_index = json.load(f)
-        
-        print(f"✅ Loaded metadata with {len(object_style_index)} objects")
-        sys.stdout.flush()
-        
-        # Find concept directories (these are organized by object/category)
-        concept_subdirs = [d for d in hookpoint_dir.iterdir() 
-                          if d.is_dir() 
-                          and d.name != 'metadata'
-                          and not d.name.startswith('.tmp')  # Ignore temp dirs
-                          and (d / "dataset_info.json").exists()]  # Must have dataset_info
-        
-        print(f"Found {len(concept_subdirs)} concept subdirectories")
-        sys.stdout.flush()
+        concept_subdirs = [d for d in hookpoint_dir.iterdir() if d.is_dir() and d.name != 'metadata']
         
         for concept_dir in concept_subdirs:
             concept_name = concept_dir.name
             
-            if concept_name not in object_style_index:
-                print(f"    ⚠️  No style metadata for '{concept_name}', skipping")
-                continue
-            
-            print(f"  Processing '{concept_name}'...")
-            sys.stdout.flush()
-            
-            try:
-                # Load the full dataset for this concept/object
-                full_dataset = HFDataset.load_from_disk(str(concept_dir), keep_in_memory=False)
-                total_rows = len(full_dataset)
-                print(f"    Loaded dataset with {total_rows} rows")
+            if (concept_dir / "dataset_info.json").exists():
+                print(f"  Loading concept '{concept_name}'...")
                 
-                # Verify it has the expected columns
-                if "object_label" not in full_dataset.column_names or "style_label" not in full_dataset.column_names:
-                    print(f"    ❌ Missing required labels. Columns: {full_dataset.column_names}")
-                    continue
+                # Load the dataset
+                dataset = HFDataset.load_from_disk(str(concept_dir), keep_in_memory=False)
+                print(f"    Dataset: {len(dataset)} samples")
                 
-            except Exception as e:
-                print(f"    ❌ Error loading dataset for {concept_name}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-            
-            # Collect indices based on style metadata
-            indices_to_select = []
-            style_sample_counts = {}
-            
-            for style_name, style_entries in object_style_index[concept_name].items():
-                if max_samples_per_style and style_name in style_sample_counts and style_sample_counts[style_name] >= max_samples_per_style:
-                    continue
+                # Remove existing labels if present
+                columns_to_remove = []
+                if "object_label" in dataset.column_names:
+                    columns_to_remove.append("object_label")
                 
-                for entry in style_entries:
-                    start_idx = entry["sample_range"][0]
-                    end_idx = entry["sample_range"][1]
-                    
-                    # Validate indices
-                    if start_idx >= total_rows or end_idx > total_rows:
-                        print(f"      ⚠️  Invalid range for {style_name}: [{start_idx}, {end_idx}) exceeds {total_rows}")
-                        continue
-                    
-                    # Calculate how many to take from this range
-                    if max_samples_per_style:
-                        current_count = style_sample_counts.get(style_name, 0)
-                        remaining = max_samples_per_style - current_count
-                        if remaining <= 0:
-                            break
-                        samples_to_take = min(remaining, end_idx - start_idx)
-                        indices_to_select.extend(range(start_idx, start_idx + samples_to_take))
-                        style_sample_counts[style_name] = current_count + samples_to_take
-                    else:
-                        indices_to_select.extend(range(start_idx, end_idx))
-                        style_sample_counts[style_name] = style_sample_counts.get(style_name, 0) + (end_idx - start_idx)
-            
-            if not indices_to_select:
-                print(f"    ⚠️  No valid indices collected for {concept_name}")
-                del full_dataset
-                continue
-            
-            print(f"    Selecting {len(indices_to_select)} samples from {len(style_sample_counts)} styles")
-            for style, count in sorted(style_sample_counts.items()):
-                print(f"      {style}: {count} samples")
-            
-            # Select the samples (single operation per concept)
-            try:
-                selected_dataset = full_dataset.select(indices_to_select)
-                all_datasets.append(selected_dataset)
-                total_samples_loaded += len(selected_dataset)
+                if columns_to_remove:
+                    dataset = dataset.remove_columns(columns_to_remove)
                 
-                print(f"    ✅ Selected {len(selected_dataset)} samples for {concept_name}")
+                # Add object label
+                dataset = dataset.add_column("object_label", [concept_name] * len(dataset))
                 
-            except Exception as e:
-                print(f"    ❌ Error selecting samples for {concept_name}: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # Clean up
-            del full_dataset
-            import gc
-            gc.collect()
+                # Set format
+                dataset.set_format(
+                    type="torch",
+                    columns=["activations", "timestep", "object_label"],
+                    dtype=dtype,
+                )
+                
+                datasets.append(dataset)
 
-    print(f"\n📊 TOTAL SAMPLES LOADED: {total_samples_loaded}")
-    
-    if total_samples_loaded == 0:
-        print("❌ ERROR: No valid samples loaded!")
-        raise ValueError(f"No valid samples loaded for hookpoint {hookpoint}")
+    if not datasets:
+        raise ValueError(f"No valid datasets found for hookpoint {hookpoint}")
 
-    # Concatenate all datasets
-    print(f"✅ Concatenating {len(all_datasets)} dataset chunks...")
-    final_dataset = concatenate_datasets(all_datasets)
+    final_dataset = concatenate_datasets(datasets)
+    print(f"\n✅ Final combined dataset: {len(final_dataset)} samples")
     
-    # Set format for PyTorch
-    final_dataset.set_format(
-        type="torch",
-        columns=["activations", "timestep", "object_label", "style_label"],
-        dtype=dtype,
-    )
-    
-    print(f"✅ Final dataset: {len(final_dataset)} samples")
-    print(f"   Objects: {len(set(final_dataset['object_label']))}")
-    print(f"   Styles: {len(set(final_dataset['style_label']))}")
-    
-    # Clean up
-    del all_datasets
-    import gc
-    gc.collect()
+    # Print object distribution summary
+    unique_objects = set(final_dataset["object_label"])
+    print(f"   Objects: {len(unique_objects)} ({list(unique_objects)[:5]}...)")
     
     return final_dataset
 
-class SAEStyleLatentOptimizer:
+class SAEConceptLatentOptimizer:
     """
-    Optimizer for SAE models focused on style unlearning.
+    Optimizer for SAE models to assign specific latents to concepts while maintaining reconstruction quality.
     
     This optimizer:
-    1. Loads raw activations for different concepts with both object and style labels
-    2. Assigns each concept to a specific latent neuron with PRIORITY given to styles
-    3. Fine-tunes the SAE to maintain reconstruction while encouraging style-specific latent assignments
-    4. Uses enhanced loss functions for style separation
+    1. Loads raw activations for different concepts with object labels
+    2. Assigns each concept (object/style) to a specific latent neuron based on pre-computed scores from JSON files
+    3. Fine-tunes the SAE to maintain reconstruction while encouraging concept-specific latent assignments
     """
     def __init__(
         self,
         checkpoint_path,
         activations_dir,
         object_scores_json_path,
-        style_scores_json_path,
         device="cuda",
         learning_rate=5e-6,
         num_epochs=5,
         reconstruction_weight=1.0,
-        cross_entropy_weight=2.0,  # Increased for style focus
+        cross_entropy_weight=1.0,
         sparsity_weight=0.01,
         batch_size=32,
-        save_dir="sae-style-latent-optimized",
+        save_dir="sae-concept-latent-optimized",
         seed=42,
         validation_split=0.2,
         mixed_batches=True,
@@ -257,7 +141,6 @@ class SAEStyleLatentOptimizer:
         self.checkpoint_path = Path(checkpoint_path)
         self.activations_dir = Path(activations_dir)
         self.object_scores_json_path = Path(object_scores_json_path)
-        self.style_scores_json_path = Path(style_scores_json_path)
         self.device = torch.device(device)
         self.lr = learning_rate
         self.num_epochs = num_epochs
@@ -301,14 +184,12 @@ class SAEStyleLatentOptimizer:
         self.saes = {}
         self.optimizers = {}
         self.object_to_latent = {}
-        self.style_to_latent = {}
         self.object_scores_data = None
-        self.style_scores_data = None
 
         # Initialize everything
         self.load_scores_data()
         self.initialize_saes()
-        self.initialize_datasets_with_styles()
+        self.initialize_datasets()
         self.initialize_wandb()
 
     def find_latest_checkpoint(self, hook_name):
@@ -330,7 +211,16 @@ class SAEStyleLatentOptimizer:
         return None, None
 
     def load_checkpoint_state(self, hook_name, checkpoint_path):
-        """Load SAE model and optimizer state from checkpoint."""
+        """
+        Load SAE model and optimizer state from checkpoint.
+        
+        Args:
+            hook_name: Name of the hook/layer
+            checkpoint_path: Path to the checkpoint directory
+            
+        Returns:
+            bool: True if successfully loaded, False otherwise
+        """
         try:
             print(f"Loading checkpoint for {hook_name} from {checkpoint_path}")
             
@@ -364,9 +254,15 @@ class SAEStyleLatentOptimizer:
                     training_state = torch.load(training_state_path, map_location=self.device)
                     self.best_val_loss = training_state.get('best_val_loss', float('inf'))
                     self.patience_counter = training_state.get('patience_counter', 0)
-                    print(f"  ✅ Loaded training state - best_val_loss: {self.best_val_loss:.6f}, patience: {self.patience_counter}")
+                    if 'object_to_latent' in training_state:
+                        self.object_to_latent[hook_name] = training_state['object_to_latent']
+                        print(f"  ✅ Loaded object assignments: {len(self.object_to_latent[hook_name])} objects")
+                    if 'style_to_latent' in training_state:
+                        self.style_to_latent[hook_name] = training_state['style_to_latent']
+                        print(f"  ✅ Loaded style assignments: {len(self.style_to_latent[hook_name])} styles")
                 except Exception as e:
                     print(f"  ⚠️  Could not load training state: {e}")
+                    print(f"  ✅ Loaded training state - best_val_loss: {self.best_val_loss:.6f}, patience: {self.patience_counter}")
             
             print(f"✅ Successfully loaded checkpoint for {hook_name}")
             return True
@@ -390,6 +286,8 @@ class SAEStyleLatentOptimizer:
                 'epoch': epoch,
                 'best_val_loss': self.best_val_loss,
                 'patience_counter': self.patience_counter,
+                'object_to_latent': self.object_to_latent.get(hook_name, {}),  
+                'style_to_latent': self.style_to_latent.get(hook_name, {}),    
             }
             torch.save(training_state, best_path / "training_state.pt")
 
@@ -444,7 +342,6 @@ class SAEStyleLatentOptimizer:
     def load_scores_data(self):
         """Load both object and style scores from separate JSON files."""
         print(f"Loading object scores from {self.object_scores_json_path}")
-        print(f"Loading style scores from {self.style_scores_json_path}")
         
         # Load object scores - skip if from_scratch and file doesn't exist
         if not self.object_scores_json_path.exists():
@@ -460,127 +357,82 @@ class SAEStyleLatentOptimizer:
             print(f"  Concept type: {self.object_scores_data.get('concept_type', 'unknown')}")
             print(f"  Number of concepts: {len(self.object_scores_data.get('scores', {}))}")
         
-        # Load style scores - skip if from_scratch and file doesn't exist
-        if not self.style_scores_json_path.exists():
-            if self.from_scratch:
-                print(f"⚠️  Style scores file not found, but training from scratch - will use random assignment")
-                self.style_scores_data = None
-            else:
-                raise FileNotFoundError(f"Style scores JSON file not found: {self.style_scores_json_path}")
-        else:
-            with open(self.style_scores_json_path, 'r') as f:
-                self.style_scores_data = json.load(f)
-            print(f"✅ Loaded style scores:")
-            print(f"  Concept type: {self.style_scores_data.get('concept_type', 'unknown')}")
-            print(f"  Number of concepts: {len(self.style_scores_data.get('scores', {}))}")
 
-    def initialize_datasets_with_styles(self):
-        """Dataset initialization with recovered style information."""
-        import sys
-        from datetime import datetime
-
-        print(f"[Rank {self.rank}] === STARTING initialize_datasets_with_styles at {datetime.now()} ===")
-        sys.stdout.flush()
-
-        print(f"[Rank {self.rank}] Memory before loading: {torch.cuda.memory_allocated(self.rank)/1e9:.2f} GB")
-        sys.stdout.flush()
+    def initialize_datasets(self):
+        """Dataset initialization."""
+        print("Initializing datasets...")
 
         hookpoint_names = list(self.saes.keys())
+
         dataset_dict = {}
-
-        # CHANGED: ALL ranks load data (not just rank 0)
-        for hookpoint in hookpoint_names:
-            print(f"[Rank {self.rank}] Loading hookpoint: {hookpoint}")
-            sys.stdout.flush()
-
-            try:
-                # Load dataset on ALL ranks
-                dataset = load_datasets_from_category_dirs_with_styles(
+        if not self.world_size > 1 or self.rank == 0:
+            for hookpoint in hookpoint_names:
+                # Use the function with style recovery
+                dataset = load_datasets_from_category_dirs(
                     [str(self.activations_dir)], 
                     hookpoint, 
-                    self.dtype,
-                    max_samples_per_style=500  # Reduced from 1000 to save memory
+                    self.dtype
                 )
-                print(f"[Rank {self.rank}] Loaded {len(dataset)} samples for {hookpoint}")
-                sys.stdout.flush()
 
-                # Shuffle with consistent seed across all ranks
+                # Apply numpy shuffling
+                print(f"Applying numpy-based shuffling to {len(dataset)} samples...")
                 indices = np.arange(len(dataset))
                 np.random.seed(self.seed)
                 np.random.shuffle(indices)
                 dataset = dataset.select(indices)
-
-                # DISTRIBUTED: Each rank gets its shard
-                if self.world_size > 1:
-                    dataset = dataset.shard(self.world_size, self.rank)
-                    print(f"[Rank {self.rank}] Shard size: {len(dataset)} samples")
-                    sys.stdout.flush()
+                print(f"✅ Applied numpy shuffling for {len(dataset)} samples")
 
                 dataset_dict[hookpoint] = dataset
+                print(f"Completed loading for {hookpoint}: {len(dataset)} samples")
 
-                print(f"[Rank {self.rank}] ✅ Completed loading for {hookpoint}: {len(dataset)} samples")
-                sys.stdout.flush()
-
-            except Exception as e:
-                print(f"[Rank {self.rank}] ❌ ERROR loading {hookpoint}: {e}")
-                import traceback
-                traceback.print_exc()
-                sys.stdout.flush()
-                raise
-
-        # synchronization barrier AFTER all ranks have loaded their data
+        # DDP synchronization
         if self.world_size > 1:
-            print(f"[Rank {self.rank}] Waiting at barrier...")
-            sys.stdout.flush()
+            dist.barrier()
+            if self.rank != 0:
+                for hookpoint in hookpoint_names:
+                    dataset = load_datasets_from_category_dirs(
+                        [str(self.activations_dir)], 
+                        hookpoint, 
+                        self.dtype
+                    )
+                    indices = np.arange(len(dataset))
+                    np.random.seed(self.seed)
+                    np.random.shuffle(indices)
+                    dataset = dataset.select(indices)
+                    dataset = dataset.shard(self.world_size, self.rank)
+                    dataset_dict[hookpoint] = dataset
 
-            try:
-                dist.barrier()
-                print(f"[Rank {self.rank}] ✅ Passed barrier successfully")
-                sys.stdout.flush()
+        # Create data loaders with labels
+        self._create_data_loaders(dataset_dict)
 
-            except Exception as e:
-                print(f"[Rank {self.rank}] ❌ BARRIER FAILED: {e}")
-                sys.stdout.flush()
-                raise
-
-        # create data loaders with dual labels
-        print(f"[Rank {self.rank}] Creating data loaders...")
-        sys.stdout.flush()
-
-        self._create_dual_data_loaders(dataset_dict)
-
-        print(f"[Rank {self.rank}] ✅ Dataset initialization completed!")
-        sys.stdout.flush()
-
-    def _create_dual_data_loaders(self, dataset_dict):
-        """DataLoader creation with both object and style labels."""
+    def _create_data_loaders(self, dataset_dict):
+        """DataLoader creation with object labels only."""
         hookpoint, dataset = next(iter(dataset_dict.items()))
-
         total_size = len(dataset)
         val_size = int(total_size * self.validation_split)
         train_size = total_size - val_size
-
         train_dataset = dataset.select(range(train_size))
         val_dataset = dataset.select(range(train_size, total_size))
-
-        def dual_label_collate_fn(batch):
-            """Collate function that handles both object and style labels."""
-            # Handle case where activations might be lists instead of tensors
-            activation_tensors = []
+        
+        def object_label_collate_fn(batch):
+            """Collate function that handles object labels only."""
+            # Convert activations to tensors if they're lists
+            activations_list = []
             for item in batch:
-                activation = item['activations']
-                if isinstance(activation, list):
-                    activation = torch.tensor(activation, dtype=self.dtype)
-                elif not isinstance(activation, torch.Tensor):
-                    activation = torch.tensor(activation, dtype=self.dtype)
-                activation_tensors.append(activation)
+                act = item['activations']
+                if isinstance(act, list):
+                    # If it's a list, convert to tensor
+                    act = torch.tensor(act) if not isinstance(act[0], torch.Tensor) else torch.stack(act)
+                elif not isinstance(act, torch.Tensor):
+                    # If it's neither a list nor a tensor, try to convert
+                    act = torch.tensor(act)
+                activations_list.append(act)
             
-            activations = torch.stack(activation_tensors)
+            activations = torch.stack(activations_list)
             object_labels = [item['object_label'] for item in batch]
-            style_labels = [item['style_label'] for item in batch]
             
-            return activations, object_labels, style_labels
-
+            return activations, object_labels
+        
         # Handle distributed training properly
         if self.world_size > 1:
             train_sampler = DistributedSampler(train_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True, seed=self.seed)
@@ -592,17 +444,17 @@ class SAEStyleLatentOptimizer:
             val_sampler = None
             train_shuffle = True
             val_shuffle = False
-
+        
         self.train_loader = DataLoader(
             train_dataset, batch_size=self.batch_size, shuffle=train_shuffle, sampler=train_sampler,
-            num_workers=2, pin_memory=True, collate_fn=dual_label_collate_fn
+            num_workers=2, pin_memory=True, collate_fn=object_label_collate_fn
         )
-
+        
         self.val_loader = DataLoader(
             val_dataset, batch_size=self.batch_size, shuffle=val_shuffle, sampler=val_sampler,
-            num_workers=2, pin_memory=True, collate_fn=dual_label_collate_fn
+            num_workers=2, pin_memory=True, collate_fn=object_label_collate_fn
         )
-
+        
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
@@ -631,18 +483,17 @@ class SAEStyleLatentOptimizer:
         return None
 
     def _assign_concepts_randomly(self, hook_name):
-        """Random assignment when training from scratch - PRIORITIZING STYLES."""
+        """Random assignment when training from scratch."""
         sae = self.saes[hook_name]
         model = sae.module if hasattr(sae, 'module') else sae
         model_num_latents = model.num_latents
 
-        # Get unique objects and styles from your data
+        # Get unique objects from a batch
         sample_batch = next(iter(self.train_loader))
-        _, object_labels, style_labels = sample_batch
+        _, object_labels = sample_batch
         unique_objects = set(object_labels)
-        unique_styles = set([s for s in style_labels if s != "none"])
 
-        print(f"Random assignment PRIORITIZING STYLES: {len(unique_styles)} styles, {len(unique_objects)} objects")
+        print(f"Random assignment for {len(unique_objects)} objects")
         print(f"Available latents: {model_num_latents}")
 
         # Create random assignments
@@ -651,49 +502,31 @@ class SAEStyleLatentOptimizer:
         random.shuffle(available_latents)
 
         object_to_latent = {}
-        style_to_latent = {}
-        latent_idx = 0
 
-        # PRIORITY 1: Assign styles first (main change)
-        for style in sorted(unique_styles):
-            if latent_idx < len(available_latents):
-                assigned_latent = available_latents[latent_idx]
-                style_to_latent[style] = assigned_latent
-                print(f"  Priority style '{style}' → latent {assigned_latent}")
-                latent_idx += 1
-            else:
-                # Fallback to random assignment with possible conflicts
-                assigned_latent = random.randint(0, model_num_latents - 1)
-                style_to_latent[style] = assigned_latent
-                print(f"  Fallback style '{style}' → latent {assigned_latent} (conflict possible)")
-
-        # PRIORITY 2: Assign objects second
-        for obj in sorted(unique_objects):
-            if latent_idx < len(available_latents):
-                assigned_latent = available_latents[latent_idx]
+        # Assign objects
+        for i, obj in enumerate(sorted(unique_objects)):
+            if i < len(available_latents):
+                assigned_latent = available_latents[i]
                 object_to_latent[obj] = assigned_latent
-                print(f"  Secondary object '{obj}' → latent {assigned_latent}")
-                latent_idx += 1
+                print(f"  Random object '{obj}' → latent {assigned_latent}")
             else:
                 # Fallback to random assignment with possible conflicts
                 assigned_latent = random.randint(0, model_num_latents - 1)
                 object_to_latent[obj] = assigned_latent
-                print(f"  Fallback object '{obj}' → latent {assigned_latent} (conflict possible)")
+                print(f"  Random object '{obj}' → latent {assigned_latent} (conflict possible)")
 
-        print(f"\nStyle-priority random assignment completed:")
-        print(f"  Styles: {len(style_to_latent)} assigned (PRIORITY)")
-        print(f"  Objects: {len(object_to_latent)} assigned (secondary)")
-        print(f"  Latents used: {latent_idx}/{model_num_latents}")
+        print(f"\nRandom assignment completed:")
+        print(f"  Objects: {len(object_to_latent)} assigned")
+        print(f"  Latents used: {min(len(unique_objects), model_num_latents)}/{model_num_latents}")
 
-        return object_to_latent, style_to_latent
+        return object_to_latent, {}  # Return empty dict for consistency
 
     def _assign_concepts_from_scores(self, hook_name):
-        """Score-based assignment with STYLE PRIORITY."""
-        if self.object_scores_data is None or self.style_scores_data is None:
-            raise RuntimeError("Object or style scores data not loaded.")
+        """Original score-based assignment logic."""
+        if self.object_scores_data is None:
+            raise RuntimeError("Object scores data not loaded.")
 
         object_scores = self.object_scores_data.get('scores', {})
-        style_scores = self.style_scores_data.get('scores', {})
         
         sae = self.saes[hook_name]
         model = sae.module if hasattr(sae, 'module') else sae
@@ -701,12 +534,10 @@ class SAEStyleLatentOptimizer:
 
         # Get unique objects and styles from your data
         sample_batch = next(iter(self.train_loader))
-        _, object_labels, style_labels = sample_batch
+        _, object_labels = sample_batch
         unique_objects = set(object_labels)
-        unique_styles = set(style_labels)
 
         print(f"Found {len(unique_objects)} unique objects: {list(unique_objects)[:5]}...")
-        print(f"Found {len(unique_styles)} unique styles: {list(unique_styles)[:5]}...")
 
         # Helper function to get averaged scores
         def get_averaged_scores(concept_scores):
@@ -721,37 +552,25 @@ class SAEStyleLatentOptimizer:
         concept_priorities = []
         concepts_without_scores = []
 
-        # CHANGED: Add styles with HIGHER priority boost (3.0 instead of 1.0)
-        for concept_name in unique_styles:
-            if concept_name != "none":
-                found_name, concept_scores = self.find_concept_in_scores(concept_name, style_scores)
-                if found_name is not None:
-                    avg_scores = get_averaged_scores(concept_scores)
-                    best_score = max(avg_scores)
-                    concept_priorities.append((concept_name, best_score + 3.0, 'style', avg_scores))  # +3.0 priority boost for styles
-                else:
-                    concepts_without_scores.append((concept_name, 'style'))
-
-        # Add objects (with smaller priority boost)
+        # Add objects (with priority boost)
         for concept_name in unique_objects:
             found_name, concept_scores = self.find_concept_in_scores(concept_name, object_scores)
             if found_name is not None:
                 avg_scores = get_averaged_scores(concept_scores)
                 best_score = max(avg_scores)
-                concept_priorities.append((concept_name, best_score + 0.5, 'object', avg_scores))  # +0.5 priority boost for objects
+                concept_priorities.append((concept_name, best_score + 1.0, 'object', avg_scores))
             else:
                 concepts_without_scores.append((concept_name, 'object'))
 
-        # Sort by priority score (highest first) - styles will be prioritized
+        # Sort by priority score (highest first)
         concept_priorities.sort(key=lambda x: x[1], reverse=True)
 
-        print(f"\nSTYLE-PRIORITY assignment (styles get highest priority):")
+        print(f"\n🎯 Priority-based assignment (top scores get first choice):")
         print(f"Concepts with scores: {len(concept_priorities)}")
         print(f"Concepts without scores: {len(concepts_without_scores)}")
 
         # Assign in priority order
         object_to_latent = {}
-        style_to_latent = {}
         latent_assignments = set()
 
         for concept_name, priority_score, concept_type, avg_scores in concept_priorities:
@@ -761,10 +580,7 @@ class SAEStyleLatentOptimizer:
             )
 
             if latent_idx is not None:
-                if concept_type == 'object':
-                    object_to_latent[concept_name] = latent_idx
-                else:  # style
-                    style_to_latent[concept_name] = latent_idx
+                object_to_latent[concept_name] = latent_idx
                     
                 latent_assignments.add(latent_idx)
                 actual_priority = priority_score - (1.0 if concept_type == 'object' else 0.0)
@@ -791,10 +607,7 @@ class SAEStyleLatentOptimizer:
                 for i, (concept_name, concept_type) in enumerate(concepts_without_scores):
                     if i < len(unused_latents):
                         latent_idx = unused_latents[i]
-                        if concept_type == 'object':
-                            object_to_latent[concept_name] = latent_idx
-                        else:
-                            style_to_latent[concept_name] = latent_idx
+                        object_to_latent[concept_name] = latent_idx
                         latent_assignments.add(latent_idx)
                         print(f"🔄 Fallback {concept_type} '{concept_name}' → latent {latent_idx}")
                     else:
@@ -808,11 +621,8 @@ class SAEStyleLatentOptimizer:
                     latent_idx = unused_latents[i % len(unused_latents)]
 
                     # Check if this latent is already assigned in fallback (avoid conflicts)
-                    if concept_name not in object_to_latent and concept_name not in style_to_latent:
-                        if concept_type == 'object':
-                            object_to_latent[concept_name] = latent_idx
-                        else:
-                            style_to_latent[concept_name] = latent_idx
+                    if concept_name not in object_to_latent:
+                        object_to_latent[concept_name] = latent_idx
                         print(f"🔄 Fallback {concept_type} '{concept_name}' → latent {latent_idx} (shared)")
             else:
                 print("⚠️  No unused latents available for fallback assignment!")
@@ -820,21 +630,16 @@ class SAEStyleLatentOptimizer:
                 import random
                 for concept_name, concept_type in concepts_without_scores:
                     latent_idx = random.randint(0, model_num_latents - 1)
-                    if concept_type == 'object':
-                        object_to_latent[concept_name] = latent_idx
-                    else:
-                        style_to_latent[concept_name] = latent_idx
+                    object_to_latent[concept_name] = latent_idx
                     print(f"🎲 Random fallback {concept_type} '{concept_name}' → latent {latent_idx} (CONFLICT LIKELY)")
 
         # Summary statistics
         assigned_objects = len(object_to_latent)
-        assigned_styles = len(style_to_latent)
-        total_assigned = assigned_objects + assigned_styles
-        unique_latents_used = len(set(list(object_to_latent.values()) + list(style_to_latent.values())))
+        total_assigned = assigned_objects 
+        unique_latents_used = len(set(list(object_to_latent.values())))
 
         print(f"\n📊 ASSIGNMENT SUMMARY:")
         print(f"Objects: {assigned_objects}/{len(unique_objects)} assigned")
-        print(f"Styles: {assigned_styles}/{len([s for s in unique_styles if s != 'none'])} assigned") 
         print(f"Total concepts: {total_assigned} assigned")
         print(f"Latents used: {unique_latents_used}/{model_num_latents} ({unique_latents_used/model_num_latents*100:.1f}%)")
 
@@ -844,10 +649,6 @@ class SAEStyleLatentOptimizer:
             if latent not in all_assignments:
                 all_assignments[latent] = []
             all_assignments[latent].append(f"object:{concept}")
-        for concept, latent in style_to_latent.items():
-            if latent not in all_assignments:
-                all_assignments[latent] = []
-            all_assignments[latent].append(f"style:{concept}")
 
         conflicts = {latent: concepts for latent, concepts in all_assignments.items() if len(concepts) > 1}
         if conflicts:
@@ -859,21 +660,21 @@ class SAEStyleLatentOptimizer:
         else:
             print("✅ No conflicts - each latent assigned to at most one concept")
 
-        return object_to_latent, style_to_latent
+        return object_to_latent, {}
 
     def assign_concepts_to_latents_from_scores(self, hook_name):
-        """
-        Assign both objects and styles to specific latents.
-        Enhanced to support random assignment when training from scratch.
-        """
-        print(f"\nAssigning objects AND styles to latents for {hook_name}...")
-
-        # Check if training from scratch
+        # CHECK IF ALREADY LOADED FROM CHECKPOINT
+        if hook_name in self.object_to_latent and self.object_to_latent[hook_name]:
+            print(f"Using loaded assignments from checkpoint for {hook_name}")
+            print(f"  Objects: {len(self.object_to_latent[hook_name])}")
+            print(f"  Styles: {len(self.style_to_latent.get(hook_name, {}))}")
+            return self.object_to_latent[hook_name], self.style_to_latent.get(hook_name, {})
+        
+        # OTHERWISE, CREATE NEW ASSIGNMENTS
         if hasattr(self, 'from_scratch') and self.from_scratch:
             print("Training from scratch - using random assignment...")
             return self._assign_concepts_randomly(hook_name)
         
-        # Original score-based assignment logic
         print("Using pre-computed scores for assignment...")
         return self._assign_concepts_from_scores(hook_name)
 
@@ -896,16 +697,249 @@ class SAEStyleLatentOptimizer:
         # Set device for this process
         torch.cuda.set_device(rank)
 
+    def print_epoch_summary(self, epoch, hook_name, train_losses, val_losses, 
+                        train_distributions, val_distributions, object_to_latent):
+        """
+        Print a comprehensive, easy-to-read summary for each epoch.
+        """
+        print(f"\n" + "="*80)
+        print(f"EPOCH {epoch} SUMMARY - {hook_name}")
+        print(f"="*80)
+
+        # 1. LOSS BREAKDOWN
+        print(f"\n📊 LOSS BREAKDOWN:")
+        print(f"{'Metric':<20} {'Training':<12} {'Validation':<12} {'Difference':<12}")
+        print(f"-" * 56)
+
+        train_diff = val_losses['total_loss'] - train_losses['total_loss']
+        recon_diff = val_losses['recon_loss'] - train_losses['recon_loss']
+        ce_diff = val_losses['ce_loss'] - train_losses['ce_loss']
+        sparsity_diff = val_losses['sparsity_loss'] - train_losses['sparsity_loss']
+
+        print(f"{'Total Loss':<20} {train_losses['total_loss']:<12.6f} {val_losses['total_loss']:<12.6f} {train_diff:>+12.6f}")
+        print(f"{'Reconstruction':<20} {train_losses['recon_loss']:<12.6f} {val_losses['recon_loss']:<12.6f} {recon_diff:>+12.6f}")
+        print(f"{'Cross Entropy':<20} {train_losses['ce_loss']:<12.6f} {val_losses['ce_loss']:<12.6f} {ce_diff:>+12.6f}")
+        print(f"{'Sparsity':<20} {train_losses['sparsity_loss']:<12.6f} {val_losses['sparsity_loss']:<12.6f} {sparsity_diff:>+12.6f}")
+
+        # Early stopping info
+        print(f"\n🛑 EARLY STOPPING INFO:")
+        print(f"Best validation loss so far: {self.best_val_loss:.6f}")
+        print(f"Current patience counter: {self.patience_counter}/{self.patience}")
+        if val_losses['total_loss'] < self.best_val_loss:
+            print(f"✅ New best validation loss!")
+        else:
+            print(f"⚠️  No improvement in validation loss")
+
+        # 2. CONCEPT ASSIGNMENT SUCCESS RATES
+        print(f"\n🎯 CONCEPT ASSIGNMENT SUCCESS:")
+        combined_concept_to_latent = {**object_to_latent}
+
+        # Calculate success rates
+        train_correct = sum(1 for concept, stats in train_distributions.items() 
+                           if combined_concept_to_latent.get(concept) == stats["dominant_latent"])
+        train_total = len(train_distributions)
+        train_success_rate = (train_correct / train_total * 100) if train_total > 0 else 0
+
+        val_correct = sum(1 for concept, stats in val_distributions.items() 
+                         if combined_concept_to_latent.get(concept) == stats["dominant_latent"])
+        val_total = len(val_distributions)
+        val_success_rate = (val_correct / val_total * 100) if val_total > 0 else 0
+
+        print(f"Training:   {train_correct:>2}/{train_total:<2} concepts correct ({train_success_rate:>6.1f}%)")
+        print(f"Validation: {val_correct:>2}/{val_total:<2} concepts correct ({val_success_rate:>6.1f}%)")
+
+        # 3. DETAILED CONCEPT TABLE
+        print(f"\n📋 CONCEPT ASSIGNMENT DETAILS:")
+        print(f"{'Concept':<15} {'Type':<8} {'Assigned':<8} {'Train Dom.':<10} {'Train Score':<11} {'Val Dom.':<9} {'Val Score':<10} {'Status':<8}")
+        print(f"-" * 90)
+
+        # Get all concepts
+        all_concepts = set(train_distributions.keys()) | set(val_distributions.keys())
+
+        for concept in sorted(all_concepts):
+            concept_type = "object" if concept in object_to_latent else "unknown"
+            assigned_latent = combined_concept_to_latent.get(concept, -1)
+
+            # Training stats
+            train_stats = train_distributions.get(concept, {})
+            train_dominant = train_stats.get("dominant_latent", -1)
+            train_score = train_stats.get("dominance_score", 0.0)
+
+            # Validation stats
+            val_stats = val_distributions.get(concept, {})
+            val_dominant = val_stats.get("dominant_latent", -1)
+            val_score = val_stats.get("dominance_score", 0.0)
+
+            # Status
+            train_match = "✓" if assigned_latent == train_dominant else "✗"
+            val_match = "✓" if assigned_latent == val_dominant else "✗"
+            status = f"{train_match}/{val_match}"
+
+            print(f"{concept:<15} {concept_type:<8} {assigned_latent:<8} {train_dominant:<10} {train_score:<11.4f} {val_dominant:<9} {val_score:<10.4f} {status:<8}")
+
+        # 4. IMPROVEMENT INDICATORS
+        print(f"\n📈 PROGRESS INDICATORS:")
+        if epoch > 1:
+            # You can store previous epoch metrics and compare here
+            print(f"🔄 Compared to previous epoch: (implement if storing previous metrics)")
+
+        # Overfitting check
+        if val_losses['total_loss'] > train_losses['total_loss'] * 1.2:
+            print(f"⚠️  WARNING: Potential overfitting detected (val_loss > 1.2 * train_loss)")
+        elif val_success_rate < train_success_rate - 10:
+            print(f"⚠️  WARNING: Validation concept success significantly lower than training")
+        else:
+            print(f"✅ Training appears healthy")
+
+        print(f"\n" + "="*80 + "\n")
+
+    def print_initial_concept_assignments(self, object_to_latent, hook_name):
+        """
+        Print the initial concept-to-latent assignments clearly for both objects and styles.
+        """
+        print(f"\n" + "="*70)
+        print(f"INITIAL CONCEPT ASSIGNMENTS - {hook_name}")
+        print(f"="*70)
+        print(f"{'Concept':<20} {'Type':<8} {'Assigned Latent':<15} {'Avg Score':<15}")
+        print(f"-" * 58)
+
+        # Get scores for display
+        object_scores = self.object_scores_data.get('scores', {}) if self.object_scores_data else {}
+
+        # Print object assignments
+        for concept, latent_idx in sorted(object_to_latent.items()):
+            # Get the original score for this assignment
+            score = "N/A"
+            if not self.from_scratch:
+                found_name, concept_scores = self.find_concept_in_scores(concept, object_scores)
+
+                if found_name is not None:
+                    # Handle both 2D (timestep x latent) and 1D (latent) score arrays
+                    if len(concept_scores) > 0 and isinstance(concept_scores[0], list):
+                        # 2D: Average across timesteps
+                        avg_scores = np.mean(concept_scores, axis=0)
+                    else:
+                        # 1D: Already averaged
+                        avg_scores = concept_scores
+
+                    # Get the score for the assigned latent
+                    if 0 <= latent_idx < len(avg_scores):
+                        score = f"{avg_scores[latent_idx]:.6f}"
+            else:
+                score = "Random"
+
+            print(f"{concept:<20} {'object':<8} {latent_idx:<15} {score:<15}")
+
+
+        print(f"\nTotal objects: {len(object_to_latent)}")
+        print(f"Total concepts: {len(object_to_latent)}")
+        print(f"="*70 + "\n")
+
+    def print_latent_distribution_summary(self, distributions, object_to_latent, epoch=None, is_validation=False):
+        """
+        Simplified version - the detailed output is now in print_epoch_summary.
+        """
+        dataset_type = "Validation" if is_validation else "Training"
+        combined_concept_to_latent = {**object_to_latent}
+
+        total_concepts = len(distributions)
+        correct_concepts = sum(1 for concept, stats in distributions.items() 
+                              if combined_concept_to_latent.get(concept) == stats["dominant_latent"])
+        success_rate = correct_concepts / total_concepts if total_concepts > 0 else 0
+
+        print(f"{dataset_type} concept assignment: {correct_concepts}/{total_concepts} ({success_rate:.1%})")
+
+    def get_latent_distribution_statistics(self, sae, data_loader, object_to_latent):
+        """Fixed statistics calculation with proper bounds checking."""
+        model = sae.module if hasattr(sae, 'module') else sae
+        model.eval()
+
+        distributions = {}
+        concept_probs = {}
+        combined_concept_to_latent = {**object_to_latent}
+
+        print("Calculating latent distribution statistics...")
+
+        with torch.no_grad():
+            for batch_idx, batch_data in enumerate(data_loader):
+                if batch_idx >= 3:  # Very limited for efficiency
+                    break
+                    
+                activations, object_labels= batch_data
+                # Combine all concepts for analysis
+                all_concepts = object_labels  
+
+                try:
+                    activations = activations.to(self.device, dtype=self.dtype)
+
+                    # Handle reshaping
+                    if len(activations.shape) == 3:
+                        original_shape = activations.shape
+                        activations = activations.reshape(-1, activations.shape[-1])
+                    
+                    pre_acts = model.pre_acts(activations)
+                    
+                    # Reshape back if needed
+                    if len(original_shape) == 3:
+                        batch_size = len(object_labels)  # Use object_labels length
+                        seq_len = original_shape[1]
+                        pre_acts = pre_acts.reshape(batch_size, seq_len, -1)
+                        pre_acts = pre_acts.mean(dim=1)
+                    
+                    # CRITICAL: Check dimensions
+                    if pre_acts.shape[1] != model.num_latents:
+                        print(f"  Skipping batch - dimension mismatch: {pre_acts.shape[1]} vs {model.num_latents}")
+                        continue
+                    
+                    probs = F.softmax(pre_acts, dim=1)
+                    
+                    # Collect stats for objects and styles separately
+                    for i, obj_concept in enumerate(object_labels):
+                        # Object concept
+                        if obj_concept not in concept_probs:
+                            concept_probs[obj_concept] = []
+                        concept_probs[obj_concept].append(probs[i])
+                        
+                except Exception as e:
+                    print(f"  Error in batch {batch_idx}: {e}")
+                    continue
+                
+        # Calculate statistics for each concept
+        for concept, prob_list in concept_probs.items():
+            if prob_list and concept in combined_concept_to_latent:
+                try:
+                    mean_probs = torch.stack(prob_list).mean(dim=0)
+                    dominant_latent = torch.argmax(mean_probs).item()
+                    
+                    # CRITICAL: Validate the dominant latent index
+                    if 0 <= dominant_latent < model.num_latents:
+                        dominance_score = mean_probs[dominant_latent].item()
+                        entropy = -torch.sum(mean_probs * torch.log(mean_probs + 1e-10)).item()
+                        
+                        distributions[concept] = {
+                            "dominant_latent": dominant_latent,
+                            "dominance_score": dominance_score,
+                            "entropy": entropy
+                        }
+                    else:
+                        print(f"  Invalid dominant latent {dominant_latent} for concept {concept}")
+                        
+                except Exception as e:
+                    print(f"  Error processing concept {concept}: {e}")
+                    continue
+                
+        return distributions
+
     def _create_sae_from_scratch(self, hook_name):
         """Create a new SAE model from scratch."""
         try:
             # Default SAE configuration
             cfg = {
-                "expansion_factor": 16,
+                "expansion_factor": 4, # For SDXL-turbo
                 "normalize_decoder": True,
                 "num_latents": 0,  # Will be calculated from d_in * expansion_factor
-                "k": 32,
-                "batch_topk": True,
+                "k": 160, # For SDXL-turbo
+                "batch_topk": False,
                 "sample_topk": False,
                 "input_unit_norm": False,
                 "multi_topk": False
@@ -939,9 +973,11 @@ class SAEStyleLatentOptimizer:
         if self.resume:
             print("Resume mode enabled - looking for latest checkpoints...")
         
+        # Infer hook name from checkpoint path
+        hook_name = self.checkpoint_path.name
+        
         # Check if the checkpoint path itself contains an SAE model
         if (self.checkpoint_path / "cfg.json").exists() and (self.checkpoint_path / "sae.safetensors").exists():
-            hook_name = self.checkpoint_path.name
             
             # Handle from_scratch mode
             if self.from_scratch:
@@ -984,9 +1020,27 @@ class SAEStyleLatentOptimizer:
                 print(f"Loaded SAE for {hook_name}")
             except Exception as e:
                 print(f"Could not load SAE from {self.checkpoint_path}: {e}")
+                # If loading fails and from_scratch is True, create from scratch
+                if self.from_scratch:
+                    print(f"Creating SAE from scratch for {hook_name} due to load failure")
+                    self._create_sae_from_scratch(hook_name)
         
-        # Handle subdirectories
-        if not self.saes:
+        # If checkpoint doesn't exist but from_scratch is True, create it
+        elif self.from_scratch:
+            print(f"No checkpoint found, creating SAE from scratch for {hook_name}")
+            self._create_sae_from_scratch(hook_name)
+            
+            # Try to resume training state if resume=True
+            if self.resume:
+                latest_epoch, latest_checkpoint_path = self.find_latest_checkpoint(hook_name)
+                if latest_epoch is not None:
+                    print(f"Loading training state from epoch {latest_epoch}")
+                    if self.load_checkpoint_state(hook_name, latest_checkpoint_path):
+                        self.start_epoch = latest_epoch + 1
+                        print(f"Will resume training from epoch {self.start_epoch}")
+        
+        else:
+            # Handle subdirectories (if checkpoint path is a parent directory)
             for hook_dir in self.checkpoint_path.iterdir():
                 if hook_dir.is_dir():
                     hook_name = hook_dir.name
@@ -1032,6 +1086,12 @@ class SAEStyleLatentOptimizer:
                         print(f"Loaded SAE for {hook_name}")
                     except Exception as e:
                         print(f"Could not load SAE for {hook_name}: {e}")
+        
+        # Final check: if still no SAEs and from_scratch is True, create one with path name
+        if not self.saes and self.from_scratch:
+            hook_name = self.checkpoint_path.name
+            print(f"Final fallback: Creating SAE from scratch for {hook_name}")
+            self._create_sae_from_scratch(hook_name)
     
     def initialize_wandb(self):
         """Initialize weights and biases for logging in offline mode."""
@@ -1047,7 +1107,7 @@ class SAEStyleLatentOptimizer:
             # Create a simple run name
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"sae_dual_concept_optimization_{timestamp}"
+            run_name = f"sae_object_concept_optimization_{timestamp}"
             
             config = {
                 "learning_rate": self.lr,
@@ -1060,7 +1120,6 @@ class SAEStyleLatentOptimizer:
                 "validation_split": self.validation_split,
                 "mixed_batches": self.mixed_batches,
                 "object_scores_json_path": str(self.object_scores_json_path),
-                "style_scores_json_path": str(self.style_scores_json_path),
                 "patience": self.patience,
                 "resume": self.resume,
                 "start_epoch": self.start_epoch,
@@ -1068,7 +1127,7 @@ class SAEStyleLatentOptimizer:
             }
             
             wandb.init(
-                project="sae_dual_concept_latent_optimizer",
+                project="sae_object_concept_latent_optimizer",
                 name=run_name,
                 config=config,
                 dir=wandb_dir
@@ -1133,31 +1192,30 @@ class SAEStyleLatentOptimizer:
             traceback.print_exc()
             return torch.tensor(1.0, device=self.device, dtype=self.dtype), torch.zeros(activations.shape[0], 1000, device=self.device)
 
-    def compute_cross_entropy_loss(self, pre_acts, object_labels, style_labels, object_to_latent, style_to_latent, original_batch_size=None):
+    def compute_cross_entropy_loss(self, pre_acts, object_labels, object_to_latent, original_batch_size=None):
         """
-        Enhanced cross-entropy loss with STYLE FOCUS: Higher weight for style targets.
-        
-        The loss is computed for ALL latents that have assigned labels:
-        - Latents corresponding to concepts present in the example get target = 1
-        - Latents corresponding to concepts NOT present in the example get target = 0
-        - Style latents get higher weight (2.0) than object latents (0.5)
-        - Latents without any assigned concept are ignored
+        Simplified cross-entropy loss: Only uses object labels, no orthogonality constraint.
         """
-        # Handle reshaping (same as original)
+        # Handle the case where pre_acts were reshaped from [batch, seq, features] to [batch*seq, features]
         if len(pre_acts.shape) == 2:
             batch_times_seq, num_latents = pre_acts.shape
             batch_size = len(object_labels)
     
+            # Check if we need to reshape back
             if batch_times_seq != batch_size:
+                # Calculate sequence length
                 seq_length = batch_times_seq // batch_size
                 if batch_times_seq == batch_size * seq_length:
+                    # Reshape back to [batch, seq, latents]
                     pre_acts = pre_acts.view(batch_size, seq_length, num_latents)
-                    pre_acts = pre_acts.mean(dim=1)
+                    # Take mean over sequence dimension
+                    pre_acts = pre_acts.mean(dim=1)  # [batch, latents]
                 else:
                     print(f"  CE Loss Error: Cannot reshape {batch_times_seq} to match batch size {batch_size}")
                     return torch.tensor(0.0, device=self.device, dtype=self.dtype)
     
         elif len(pre_acts.shape) == 3:
+            # If 3D [batch, seq, latents], take mean over sequence
             pre_acts = pre_acts.mean(dim=1)
     
         if len(pre_acts.shape) != 2:
@@ -1166,82 +1224,55 @@ class SAEStyleLatentOptimizer:
     
         batch_size, num_latents = pre_acts.shape
     
-        if batch_size != len(object_labels) or batch_size != len(style_labels):
+        # Ensure batch size matches
+        if batch_size != len(object_labels):
             print(f"  CE Loss Error: Batch size mismatch")
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
     
-        # Get all assigned latent indices
-        all_assigned_latents = set()
-        all_assigned_latents.update(object_to_latent.values())
-        all_assigned_latents.update(style_to_latent.values())
-        all_assigned_latents = sorted(list(all_assigned_latents))
-        
-        if len(all_assigned_latents) == 0:
-            print(f"  CE Loss: No assigned latents found")
-            return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-    
-        # Create target tensor, weight tensor, and mask for assigned latents only
-        target_tensor = torch.zeros(batch_size, num_latents, device=self.device, dtype=torch.float32)
-        weight_tensor = torch.ones(batch_size, num_latents, device=self.device, dtype=torch.float32)
-        loss_mask = torch.zeros(batch_size, num_latents, device=self.device, dtype=torch.bool)
+        # Create target tensor for all samples - ONLY OBJECTS (no styles)
+        target_mask = torch.zeros(batch_size, num_latents, device=self.device, dtype=torch.float32)
         
         valid_samples = 0
         
-        for i, (object_concept, style_concept) in enumerate(zip(object_labels, style_labels)):
-            sample_has_targets = False
-            
-            # For this sample, mark ALL assigned latents in the loss mask with default weight
-            for latent_idx in all_assigned_latents:
-                if 0 <= latent_idx < num_latents:
-                    loss_mask[i, latent_idx] = True
-                    # Set default weight (will be overridden for active concepts)
-                    if latent_idx in object_to_latent.values():
-                        weight_tensor[i, latent_idx] = 0.5  # Lower weight for object latents
-                    elif latent_idx in style_to_latent.values():
-                        weight_tensor[i, latent_idx] = 2.0  # Higher weight for style latents
-                    sample_has_targets = True
-            
-            # Set target = 1 for latents corresponding to concepts present in this example
-            # Set object target if available (with lower weight)
+        # Only use object labels (ignore style_labels completely)
+        for i, object_concept in enumerate(object_labels):
+            # Set object target if available
             if object_concept in object_to_latent:
                 object_latent = object_to_latent[object_concept]
                 if 0 <= object_latent < num_latents:
-                    target_tensor[i, object_latent] = 1.0
-                    weight_tensor[i, object_latent] = 0.5  # Lower weight for objects
-            
-            # Set style target if available and not "none" (with HIGHER weight)
-            if style_concept != "none" and style_concept in style_to_latent:
-                style_latent = style_to_latent[style_concept]
-                if 0 <= style_latent < num_latents:
-                    target_tensor[i, style_latent] = 1.0
-                    weight_tensor[i, style_latent] = 2.0  # HIGHER weight for styles
-            
-            # All other assigned latents remain at target=0 with their respective type weights
-            
-            if sample_has_targets:
-                valid_samples += 1
+                    target_mask[i, object_latent] = 1.0
+                    valid_samples += 1
     
         if valid_samples == 0:
             print(f"  CE Loss: No valid targets found")
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
     
-        # Weighted binary cross-entropy with logits
-        bce_loss = F.binary_cross_entropy_with_logits(pre_acts, target_tensor, reduction='none')
+        # Binary cross-entropy with logits
+        bce_loss = F.binary_cross_entropy_with_logits(pre_acts, target_mask, reduction='none')
         
-        # Only compute loss for assigned latent positions
-        if loss_mask.sum() == 0:
-            print(f"  CE Loss: No assigned latent positions")
+        # Only compute loss for samples and latents that have targets
+        valid_mask = target_mask > 0
+        
+        if valid_mask.sum() == 0:
+            print(f"  CE Loss: No valid target positions")
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
         
-        # Apply weights and compute weighted average loss over assigned latent positions
-        weighted_loss = bce_loss * weight_tensor
-        ce_loss = weighted_loss[loss_mask].mean()
+        # Average loss only over valid target positions
+        ce_loss = bce_loss[valid_mask].mean()
         
-        print(f"  Weighted CE Loss: {ce_loss.item():.6f} (from {valid_samples} samples, {loss_mask.sum().item()} assigned latent positions)")
+        # Return only the BCE loss (no orthogonality constraint)
         return ce_loss
     
     def compute_sparsity_loss(self, pre_acts):
-        """Compute L1 sparsity regularization on pre-activations."""
+        """
+        Compute L1 sparsity regularization on pre-activations.
+
+        Args:
+            pre_acts: Pre-activations from the SAE
+
+        Returns:
+            loss: The sparsity loss
+        """
         # Check for NaN values
         if torch.isnan(pre_acts).any():
             return torch.tensor(0.0, device=self.device, dtype=self.dtype)
@@ -1258,10 +1289,10 @@ class SAEStyleLatentOptimizer:
 
         return sparsity
     
-    def evaluate_losses(self, sae, hook_name, object_to_latent, style_to_latent, is_validation=False):
+    def evaluate_losses(self, sae, hook_name, object_to_latent, is_validation=False):
         """
         Evaluate the losses for either training or validation set.
-        STYLE-FOCUSED version with style separation loss.
+        Fixed version with better memory management and progress tracking.
         """
         # Choose the appropriate loader
         loader = self.val_loader if is_validation else self.train_loader
@@ -1287,7 +1318,7 @@ class SAEStyleLatentOptimizer:
 
         # Evaluate
         with torch.no_grad():
-            for batch_idx, (activations, object_labels, style_labels) in enumerate(loader):
+            for batch_idx, (activations, object_labels) in enumerate(loader):
                 if batch_idx >= max_batches:
                     break
                 
@@ -1299,10 +1330,10 @@ class SAEStyleLatentOptimizer:
 
                     # Compute losses
                     recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-                    ce_loss = self.compute_cross_entropy_loss(pre_acts, object_labels, style_labels, object_to_latent, style_to_latent)
+                    ce_loss = self.compute_cross_entropy_loss(pre_acts, object_labels, object_to_latent)
                     sparsity_loss = self.compute_sparsity_loss(pre_acts)
 
-                    # Combined loss with style separation
+                    # Combined loss
                     total_loss = (
                         self.reconstruction_weight * recon_loss +
                         self.cross_entropy_weight * ce_loss +
@@ -1339,7 +1370,7 @@ class SAEStyleLatentOptimizer:
             "total_loss": avg_total_loss,
             "recon_loss": avg_recon_loss,
             "ce_loss": avg_ce_loss,
-            "sparsity_loss": avg_sparsity_loss,
+            "sparsity_loss": avg_sparsity_loss
         }
 
     def check_early_stopping(self, val_loss, epoch, sae, hook_name, optimizer):
@@ -1347,7 +1378,7 @@ class SAEStyleLatentOptimizer:
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.patience_counter = 0
-            print(f"New best validation loss: {self.best_val_loss:.6f}")
+            print(f"✅ New best validation loss: {self.best_val_loss:.6f}")
 
             # Save the best model
             if isinstance(sae, DDP):
@@ -1358,285 +1389,20 @@ class SAEStyleLatentOptimizer:
             return False
         else:
             self.patience_counter += 1
-            print(f"No improvement in validation loss. Patience: {self.patience_counter}/{self.patience}")
+            print(f"⚠️  No improvement in validation loss. Patience: {self.patience_counter}/{self.patience}")
 
             if self.patience_counter >= self.patience:
-                print(f"Early stopping triggered after {self.patience} epochs without improvement")
+                print(f"🛑 Early stopping triggered after {self.patience} epochs without improvement")
                 return True
 
             return False
-
-    def get_latent_distribution_statistics(self, sae, data_loader, object_to_latent, style_to_latent):
-        """Fixed statistics calculation with proper bounds checking."""
-        model = sae.module if hasattr(sae, 'module') else sae
-        model.eval()
-
-        distributions = {}
-        concept_probs = {}
-        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
-
-        print("Calculating latent distribution statistics...")
-
-        with torch.no_grad():
-            for batch_idx, batch_data in enumerate(data_loader):
-                if batch_idx >= 3:  # Very limited for efficiency
-                    break
-                    
-                activations, object_labels, style_labels = batch_data
-
-                try:
-                    activations = activations.to(self.device, dtype=self.dtype)
-
-                    # Handle reshaping
-                    if len(activations.shape) == 3:
-                        original_shape = activations.shape
-                        activations = activations.reshape(-1, activations.shape[-1])
-                    
-                    pre_acts = model.pre_acts(activations)
-                    
-                    # Reshape back if needed
-                    if len(original_shape) == 3:
-                        batch_size = len(object_labels)  # Use object_labels length
-                        seq_len = original_shape[1]
-                        pre_acts = pre_acts.reshape(batch_size, seq_len, -1)
-                        pre_acts = pre_acts.mean(dim=1)
-                    
-                    # CRITICAL: Check dimensions
-                    if pre_acts.shape[1] != model.num_latents:
-                        print(f"  Skipping batch - dimension mismatch: {pre_acts.shape[1]} vs {model.num_latents}")
-                        continue
-                    
-                    probs = F.softmax(pre_acts, dim=1)
-                    
-                    # Collect stats for objects and styles separately
-                    for i, (obj_concept, style_concept) in enumerate(zip(object_labels, style_labels)):
-                        # Object concept
-                        if obj_concept not in concept_probs:
-                            concept_probs[obj_concept] = []
-                        concept_probs[obj_concept].append(probs[i])
-                        
-                        # Style concept (if not "none")
-                        if style_concept != "none":
-                            if style_concept not in concept_probs:
-                                concept_probs[style_concept] = []
-                            concept_probs[style_concept].append(probs[i])
-                        
-                except Exception as e:
-                    print(f"  Error in batch {batch_idx}: {e}")
-                    continue
-                
-        # Calculate statistics for each concept
-        for concept, prob_list in concept_probs.items():
-            if prob_list and concept in combined_concept_to_latent:
-                try:
-                    mean_probs = torch.stack(prob_list).mean(dim=0)
-                    dominant_latent = torch.argmax(mean_probs).item()
-                    
-                    # CRITICAL: Validate the dominant latent index
-                    if 0 <= dominant_latent < model.num_latents:
-                        dominance_score = mean_probs[dominant_latent].item()
-                        entropy = -torch.sum(mean_probs * torch.log(mean_probs + 1e-10)).item()
-                        
-                        distributions[concept] = {
-                            "dominant_latent": dominant_latent,
-                            "dominance_score": dominance_score,
-                            "entropy": entropy
-                        }
-                    else:
-                        print(f"  Invalid dominant latent {dominant_latent} for concept {concept}")
-                        
-                except Exception as e:
-                    print(f"  Error processing concept {concept}: {e}")
-                    continue
-                
-        return distributions
-
-    def print_latent_distribution_summary(self, distributions, object_to_latent, style_to_latent, epoch=None, is_validation=False):
-        """Simplified version with style/object breakdown."""
-        dataset_type = "Validation" if is_validation else "Training"
-        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
-
-        # Separate style and object success
-        style_correct = sum(1 for concept, stats in distributions.items() 
-                           if concept in style_to_latent and 
-                           combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        style_total = sum(1 for concept in distributions.keys() if concept in style_to_latent)
-        style_success_rate = style_correct / style_total if style_total > 0 else 0
-
-        obj_correct = sum(1 for concept, stats in distributions.items() 
-                         if concept in object_to_latent and 
-                         combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        obj_total = sum(1 for concept in distributions.keys() if concept in object_to_latent)
-        obj_success_rate = obj_correct / obj_total if obj_total > 0 else 0
-
-        total_correct = style_correct + obj_correct
-        total_concepts = style_total + obj_total
-        overall_success = total_correct / total_concepts if total_concepts > 0 else 0
-
-        print(f"{dataset_type} - Styles: {style_correct}/{style_total} ({style_success_rate:.1%}), Objects: {obj_correct}/{obj_total} ({obj_success_rate:.1%}), Overall: {total_correct}/{total_concepts} ({overall_success:.1%})")
-
-    def print_initial_concept_assignments(self, object_to_latent, style_to_latent, hook_name):
-        """Print the initial concept-to-latent assignments clearly for both objects and styles. STYLE-FOCUSED version."""
-        print(f"\n" + "="*70)
-        print(f"INITIAL STYLE-PRIORITY ASSIGNMENTS - {hook_name}")
-        print(f"="*70)
-        print(f"{'Concept':<20} {'Type':<8} {'Assigned Latent':<15} {'Avg Score':<15}")
-        print(f"-" * 58)
-
-        # Get scores for display
-        object_scores = self.object_scores_data.get('scores', {}) if self.object_scores_data else {}
-        style_scores = self.style_scores_data.get('scores', {}) if self.style_scores_data else {}
-
-        # Print STYLE assignments first (priority)
-        print("STYLES (PRIMARY FOCUS):")
-        for concept, latent_idx in sorted(style_to_latent.items()):
-            # Get the original score for this assignment
-            score = "N/A"
-            if not self.from_scratch:
-                found_name, concept_scores = self.find_concept_in_scores(concept, style_scores)
-
-                if found_name is not None:
-                    # Handle both 2D (timestep x latent) and 1D (latent) score arrays
-                    if len(concept_scores) > 0 and isinstance(concept_scores[0], list):
-                        # 2D: Average across timesteps
-                        avg_scores = np.mean(concept_scores, axis=0)
-                    else:
-                        # 1D: Already averaged
-                        avg_scores = concept_scores
-
-                    # Get the score for the assigned latent
-                    if 0 <= latent_idx < len(avg_scores):
-                        score = f"{avg_scores[latent_idx]:.6f}"
-            else:
-                score = "Random"
-
-            print(f"  {concept:<18} {'style':<8} {latent_idx:<15} {score:<15}")
-
-        print("\nOBJECTS (SECONDARY):")
-        # Print object assignments
-        for concept, latent_idx in sorted(object_to_latent.items()):
-            # Get the original score for this assignment
-            score = "N/A"
-            if not self.from_scratch:
-                found_name, concept_scores = self.find_concept_in_scores(concept, object_scores)
-
-                if found_name is not None:
-                    # Handle both 2D (timestep x latent) and 1D (latent) score arrays
-                    if len(concept_scores) > 0 and isinstance(concept_scores[0], list):
-                        # 2D: Average across timesteps
-                        avg_scores = np.mean(concept_scores, axis=0)
-                    else:
-                        # 1D: Already averaged
-                        avg_scores = concept_scores
-
-                    # Get the score for the assigned latent
-                    if 0 <= latent_idx < len(avg_scores):
-                        score = f"{avg_scores[latent_idx]:.6f}"
-            else:
-                score = "Random"
-
-            print(f"  {concept:<18} {'object':<8} {latent_idx:<15} {score:<15}")
-
-        print(f"\nTotal STYLES: {len(style_to_latent)} (PRIMARY FOCUS)")
-        print(f"Total objects: {len(object_to_latent)} (secondary)")
-        print(f"Total concepts: {len(object_to_latent) + len(style_to_latent)}")
-        print(f"="*70 + "\n")
-
-    def print_epoch_summary(self, epoch, hook_name, train_losses, val_losses, 
-                        train_distributions, val_distributions, object_to_latent, style_to_latent):
-        """Print comprehensive epoch summary with style focus."""
-        print(f"\n" + "="*80)
-        print(f"EPOCH {epoch} SUMMARY - {hook_name} (STYLE-FOCUSED)")
-        print(f"="*80)
-
-        # 1. LOSS BREAKDOWN
-        print(f"\nLOSS BREAKDOWN:")
-        print(f"{'Metric':<20} {'Training':<12} {'Validation':<12} {'Difference':<12}")
-        print(f"-" * 56)
-
-        train_diff = val_losses['total_loss'] - train_losses['total_loss']
-        recon_diff = val_losses['recon_loss'] - train_losses['recon_loss']
-        ce_diff = val_losses['ce_loss'] - train_losses['ce_loss']
-        sparsity_diff = val_losses['sparsity_loss'] - train_losses['sparsity_loss']
-
-        print(f"{'Total Loss':<20} {train_losses['total_loss']:<12.6f} {val_losses['total_loss']:<12.6f} {train_diff:>+12.6f}")
-        print(f"{'Reconstruction':<20} {train_losses['recon_loss']:<12.6f} {val_losses['recon_loss']:<12.6f} {recon_diff:>+12.6f}")
-        print(f"{'Cross Entropy':<20} {train_losses['ce_loss']:<12.6f} {val_losses['ce_loss']:<12.6f} {ce_diff:>+12.6f}")
-        print(f"{'Sparsity':<20} {train_losses['sparsity_loss']:<12.6f} {val_losses['sparsity_loss']:<12.6f} {sparsity_diff:>+12.6f}")
-
-        # Early stopping info
-        print(f"\nEARLY STOPPING INFO:")
-        print(f"Best validation loss so far: {self.best_val_loss:.6f}")
-        print(f"Current patience counter: {self.patience_counter}/{self.patience}")
-        if val_losses['total_loss'] < self.best_val_loss:
-            print(f"New best validation loss!")
-        else:
-            print(f"No improvement in validation loss")
-
-        # 2. STYLE vs OBJECT SUCCESS RATES (separate calculation)
-        print(f"\nSTYLE vs OBJECT ASSIGNMENT SUCCESS:")
-        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
-
-        # Separate style and object success rates
-        style_train_correct = sum(1 for concept, stats in train_distributions.items() 
-                                 if concept in style_to_latent and 
-                                 combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        style_train_total = sum(1 for concept in train_distributions.keys() if concept in style_to_latent)
-        style_train_success = (style_train_correct / style_train_total * 100) if style_train_total > 0 else 0
-
-        obj_train_correct = sum(1 for concept, stats in train_distributions.items() 
-                               if concept in object_to_latent and 
-                               combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        obj_train_total = sum(1 for concept in train_distributions.keys() if concept in object_to_latent)
-        obj_train_success = (obj_train_correct / obj_train_total * 100) if obj_train_total > 0 else 0
-
-        style_val_correct = sum(1 for concept, stats in val_distributions.items() 
-                               if concept in style_to_latent and 
-                               combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        style_val_total = sum(1 for concept in val_distributions.keys() if concept in style_to_latent)
-        style_val_success = (style_val_correct / style_val_total * 100) if style_val_total > 0 else 0
-
-        obj_val_correct = sum(1 for concept, stats in val_distributions.items() 
-                             if concept in object_to_latent and 
-                             combined_concept_to_latent.get(concept) == stats["dominant_latent"])
-        obj_val_total = sum(1 for concept in val_distributions.keys() if concept in object_to_latent)
-        obj_val_success = (obj_val_correct / obj_val_total * 100) if obj_val_total > 0 else 0
-
-        print(f"STYLES   - Train: {style_train_correct:>2}/{style_train_total:<2} ({style_train_success:>6.1f}%) | Val: {style_val_correct:>2}/{style_val_total:<2} ({style_val_success:>6.1f}%)")
-        print(f"Objects - Train: {obj_train_correct:>2}/{obj_train_total:<2} ({obj_train_success:>6.1f}%) | Val: {obj_val_correct:>2}/{obj_val_total:<2} ({obj_val_success:>6.1f}%)")
-
-        # Overall success
-        train_correct = style_train_correct + obj_train_correct
-        train_total = style_train_total + obj_train_total
-        train_success_rate = (train_correct / train_total * 100) if train_total > 0 else 0
-
-        val_correct = style_val_correct + obj_val_correct
-        val_total = style_val_total + obj_val_total
-        val_success_rate = (val_correct / val_total * 100) if val_total > 0 else 0
-
-        print(f"OVERALL - Train: {train_correct:>2}/{train_total:<2} ({train_success_rate:>6.1f}%) | Val: {val_correct:>2}/{val_total:<2} ({val_success_rate:>6.1f}%)")
-
-        # 3. STYLE-SPECIFIC PROGRESS INDICATORS
-        print(f"\nSTYLE-FOCUSED PROGRESS:")
-        if style_val_success >= 80:
-            print(f"EXCELLENT style assignment success ({style_val_success:.1f}%)")
-        elif style_val_success >= 60:
-            print(f"Good style assignment success ({style_val_success:.1f}%)")
-        elif style_val_success >= 40:
-            print(f"Moderate style assignment success ({style_val_success:.1f}%)")
-
-        # Overfitting check
-        if val_losses['total_loss'] > train_losses['total_loss'] * 1.2:
-            print(f"WARNING: Potential overfitting detected")
-        elif style_val_success < style_train_success - 15:  # More strict for styles
-            print(f"WARNING: Style validation success significantly lower than training")
-        else:
-            print(f"Training appears healthy for style learning")
-
-        print(f"\n" + "="*80 + "\n")
-
+    
     def train(self):
-        """Train the SAE models with style-focused optimization."""
+        """
+        Train the SAE models to assign specific latents to concepts using distributed training.
+        This method handles both single-GPU and multi-GPU (distributed) training.
+        Enhanced with objectconcept assignment, resume functionality and early stopping.
+        """
         # Create save directory if it doesn't exist
         if self.rank == 0:
             if not os.path.exists(self.save_dir):
@@ -1645,31 +1411,25 @@ class SAEStyleLatentOptimizer:
         # Process each SAE model
         for hook_name, sae in self.saes.items():
             if self.rank == 0:
-                print(f"\nTraining STYLE-FOCUSED SAE model for {hook_name}")
+                print(f"\nTraining SAE model for {hook_name}")
                 if self.resume and self.start_epoch > 1:
                     print(f"Resuming training from epoch {self.start_epoch}")
 
-            # Assign concepts to latents (only on rank 0)
+            # Assign concepts to latents based on pre-computed scores (only on rank 0)
             if self.rank == 0:
-                object_to_latent, style_to_latent = self.assign_concepts_to_latents_from_scores(hook_name)
+                object_to_latent, _ = self.assign_concepts_to_latents_from_scores(hook_name)
                 self.object_to_latent[hook_name] = object_to_latent
-                self.style_to_latent[hook_name] = style_to_latent
-                self.print_initial_concept_assignments(object_to_latent, style_to_latent, hook_name)
+                self.print_initial_concept_assignments(object_to_latent, hook_name)
 
                 if self.world_size > 1:
                     # Broadcast mappings to all processes
                     object_list = [self.object_to_latent[hook_name]]
-                    style_list = [self.style_to_latent[hook_name]]
                     dist.broadcast_object_list(object_list, src=0)
-                    dist.broadcast_object_list(style_list, src=0)
             else:
                 # Other ranks receive the mappings
                 object_list = [None]
-                style_list = [None]
                 dist.broadcast_object_list(object_list, src=0)
-                dist.broadcast_object_list(style_list, src=0)
                 self.object_to_latent[hook_name] = object_list[0]
-                self.style_to_latent[hook_name] = style_list[0]
             
             # Make sure all processes have the mappings before continuing
             if self.world_size > 1:
@@ -1677,8 +1437,8 @@ class SAEStyleLatentOptimizer:
             
             # Compute initial losses (only on rank 0 for logging purposes)
             if self.rank == 0 and self.start_epoch == 1:
-                train_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=False)
-                val_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], self.style_to_latent[hook_name], is_validation=True)
+                train_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], is_validation=False)
+                val_losses = self.evaluate_losses(sae, hook_name, self.object_to_latent[hook_name], is_validation=True)
                 
                 print("\n=== Initial Losses ===")
                 print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
@@ -1700,20 +1460,19 @@ class SAEStyleLatentOptimizer:
             for epoch in range(self.start_epoch, self.num_epochs + 1):
                 if self.rank == 0:
                     print(f"\nEpoch {epoch}/{self.num_epochs}")
-                    print(f"Training STYLE-FOCUSED {hook_name}...")
+                    print(f"Training {hook_name}...")
 
                 sae.train()
                 optimizer = self.optimizers[hook_name]
                 
                 # Get the concept-to-latent mappings for this hook
                 object_to_latent = self.object_to_latent[hook_name]
-                style_to_latent = self.style_to_latent[hook_name]
                 
                 # Set epoch for train sampler (for distributed training)
                 if self.world_size > 1 and hasattr(self.train_loader.sampler, 'set_epoch'):
                     self.train_loader.sampler.set_epoch(epoch)
                 
-                # Track losses (including style separation)
+                # Track losses
                 total_loss_sum = 0.0
                 recon_loss_sum = 0.0
                 ce_loss_sum = 0.0
@@ -1725,7 +1484,7 @@ class SAEStyleLatentOptimizer:
                     data_iter = tqdm(data_iter, desc="Batches")
 
                 # Process batches
-                for batch_idx, (activations, object_labels, style_labels) in enumerate(data_iter):
+                for batch_idx, (activations, object_labels) in enumerate(data_iter):
                     if batch_idx % 10 == 0:
                         torch.cuda.empty_cache()
                     
@@ -1736,8 +1495,19 @@ class SAEStyleLatentOptimizer:
                     if self.mixed_precision and torch.cuda.is_available() and not self.use_float16:
                         with torch.amp.autocast('cuda'):
                             recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-                            ce_loss = self.compute_cross_entropy_loss(pre_acts, object_labels, style_labels, object_to_latent, style_to_latent, original_batch_size=original_batch_size)
+
+                            # Cross-entropy loss for concept-specific latents
+                            ce_loss = self.compute_cross_entropy_loss(
+                                pre_acts, 
+                                object_labels, 
+                                object_to_latent,
+                                original_batch_size=original_batch_size
+                            )
+
+                            # Sparsity loss
                             sparsity_loss = self.compute_sparsity_loss(pre_acts)
+
+                            # Combined loss
                             total_loss = (
                                 self.reconstruction_weight * recon_loss +
                                 self.cross_entropy_weight * ce_loss +
@@ -1756,8 +1526,19 @@ class SAEStyleLatentOptimizer:
                     else:
                         # Standard precision training
                         recon_loss, pre_acts = self.compute_reconstruction_loss(sae, activations)
-                        ce_loss = self.compute_cross_entropy_loss(pre_acts, object_labels, style_labels, object_to_latent, style_to_latent, original_batch_size=original_batch_size)
+
+                        # Cross-entropy loss for concept-specific latents
+                        ce_loss = self.compute_cross_entropy_loss(
+                            pre_acts, 
+                            object_labels, 
+                            object_to_latent,
+                            original_batch_size=original_batch_size
+                        )
+
+                        # Sparsity loss
                         sparsity_loss = self.compute_sparsity_loss(pre_acts)
+
+                        # Combined loss
                         total_loss = (
                             self.reconstruction_weight * recon_loss +
                             self.cross_entropy_weight * ce_loss +
@@ -1772,6 +1553,8 @@ class SAEStyleLatentOptimizer:
                             continue
                         
                         total_loss.backward()
+
+                        # Gradient clipping to prevent explosion
                         torch.nn.utils.clip_grad_norm_(sae.parameters() if not isinstance(sae, DDP) else sae.module.parameters(), 1.0)
 
                         # Gradient accumulation
@@ -1779,7 +1562,7 @@ class SAEStyleLatentOptimizer:
                             optimizer.step()
                             optimizer.zero_grad(set_to_none=True)
                     
-                    # Accumulate losses for logging (including style separation)
+                    # Accumulate losses for logging
                     total_loss_sum += total_loss.item()
                     recon_loss_sum += recon_loss.item()
                     ce_loss_sum += ce_loss.item()
@@ -1787,6 +1570,7 @@ class SAEStyleLatentOptimizer:
                     num_batches += 1
 
                     del recon_loss, ce_loss, sparsity_loss, total_loss
+
                     if 'pre_acts' in locals():
                         del pre_acts
 
@@ -1798,7 +1582,7 @@ class SAEStyleLatentOptimizer:
                 
                 # Synchronize loss statistics across processes (for distributed training)
                 if self.world_size > 1:
-                    # Create tensors with loss values (including style separation)
+                    # Create tensors with loss values
                     loss_tensor = torch.tensor(
                         [total_loss_sum, recon_loss_sum, ce_loss_sum, sparsity_loss_sum, num_batches],
                         dtype=torch.float32, device=self.device
@@ -1833,8 +1617,8 @@ class SAEStyleLatentOptimizer:
                     print(f"  Sparsity Loss: {avg_sparsity_loss:.6f}")
                     
                     # Evaluate on validation set
-                    train_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=False)
-                    val_losses = self.evaluate_losses(sae, hook_name, object_to_latent, style_to_latent, is_validation=True)
+                    train_losses = self.evaluate_losses(sae, hook_name, object_to_latent, is_validation=False)
+                    val_losses = self.evaluate_losses(sae, hook_name, object_to_latent, is_validation=True)
                     
                     print(f"\n=== End of Epoch {epoch} Losses ===")
                     print(f"  Training   - Total: {train_losses['total_loss']:.6f}, Recon: {train_losses['recon_loss']:.6f}, CE: {train_losses['ce_loss']:.6f}")
@@ -1851,7 +1635,7 @@ class SAEStyleLatentOptimizer:
 
                     # Check if we should stop early
                     if should_stop:
-                        print(f"Early stopping triggered at epoch {epoch}")
+                        print(f"🛑 Early stopping triggered at epoch {epoch}")
                         break
                     
                     # Calculate latent distribution statistics
@@ -1859,22 +1643,30 @@ class SAEStyleLatentOptimizer:
                         sae if not isinstance(sae, DDP) else sae.module,
                         self.train_loader,
                         object_to_latent,
-                        style_to_latent
                     )
                     val_distributions = self.get_latent_distribution_statistics(
                         sae if not isinstance(sae, DDP) else sae.module,
                         self.val_loader,
                         object_to_latent,
-                        style_to_latent
                     )
                     
                     # Print distribution summaries
-                    self.print_latent_distribution_summary(train_distributions, object_to_latent, style_to_latent, epoch=epoch, is_validation=False)
-                    self.print_latent_distribution_summary(val_distributions, object_to_latent, style_to_latent, epoch=epoch, is_validation=True)
+                    self.print_latent_distribution_summary(
+                        train_distributions, 
+                        object_to_latent,
+                        epoch=epoch, 
+                        is_validation=False
+                    )
+                    self.print_latent_distribution_summary(
+                        val_distributions, 
+                        object_to_latent,
+                        epoch=epoch, 
+                        is_validation=True
+                    )
                     
-                    # Log metrics to wandb (including style separation)
+                    # Log metrics to wandb
                     if WANDB_AVAILABLE:
-                        combined_concept_to_latent = {**object_to_latent, **style_to_latent}
+                        combined_concept_to_latent = {**object_to_latent}
                         
                         metrics = {
                             f"{hook_name}/train/total_loss": train_losses['total_loss'],
@@ -1888,42 +1680,31 @@ class SAEStyleLatentOptimizer:
                             "epoch": epoch
                         }
                         
-                        # Calculate and log success rates (separate for styles and objects)
-                        style_train_success = sum(1 for c, s in train_distributions.items() 
-                                                 if c in style_to_latent and combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        style_train_total = sum(1 for c in train_distributions.keys() if c in style_to_latent)
-                        style_train_rate = style_train_success / style_train_total if style_train_total > 0 else 0
-
-                        obj_train_success = sum(1 for c, s in train_distributions.items() 
-                                               if c in object_to_latent and combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        obj_train_total = sum(1 for c in train_distributions.keys() if c in object_to_latent)
-                        obj_train_rate = obj_train_success / obj_train_total if obj_train_total > 0 else 0
-
-                        style_val_success = sum(1 for c, s in val_distributions.items() 
-                                               if c in style_to_latent and combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        style_val_total = sum(1 for c in val_distributions.keys() if c in style_to_latent)
-                        style_val_rate = style_val_success / style_val_total if style_val_total > 0 else 0
-
-                        obj_val_success = sum(1 for c, s in val_distributions.items() 
-                                             if c in object_to_latent and combined_concept_to_latent.get(c) == s["dominant_latent"])
-                        obj_val_total = sum(1 for c in val_distributions.keys() if c in object_to_latent)
-                        obj_val_rate = obj_val_success / obj_val_total if obj_val_total > 0 else 0
-
+                        # Calculate and log success rates
+                        train_success = sum(1 for c, s in train_distributions.items() 
+                                           if combined_concept_to_latent.get(c) == s["dominant_latent"])
+                        train_success_rate = train_success / len(train_distributions) if train_distributions else 0
+    
+                        val_success = sum(1 for c, s in val_distributions.items() 
+                                         if combined_concept_to_latent.get(c) == s["dominant_latent"])
+                        val_success_rate = val_success / len(val_distributions) if val_distributions else 0
+    
                         metrics.update({
-                            f"{hook_name}/train/style_success_rate": style_train_rate,
-                            f"{hook_name}/train/object_success_rate": obj_train_rate,
-                            f"{hook_name}/val/style_success_rate": style_val_rate,
-                            f"{hook_name}/val/object_success_rate": obj_val_rate,
+                            f"{hook_name}/train/concept_success_rate": train_success_rate,
+                            f"{hook_name}/val/concept_success_rate": val_success_rate,
                         })
                         
                         wandb.log(metrics)
                     
                     # Print comprehensive epoch summary
-                    self.print_epoch_summary(epoch, hook_name, train_losses, val_losses, train_distributions, val_distributions, object_to_latent, style_to_latent)
+                    self.print_epoch_summary(
+                        epoch, hook_name, train_losses, val_losses,
+                        train_distributions, val_distributions, object_to_latent 
+                    )
                     
                     # Check if we should stop early
                     if should_stop:
-                        print(f"Early stopping triggered at epoch {epoch}")
+                        print(f"🛑 Early stopping triggered at epoch {epoch}")
                         break
                 
                 # Synchronize processes before starting the next epoch
@@ -1932,9 +1713,9 @@ class SAEStyleLatentOptimizer:
         
         if self.rank == 0:
             if hasattr(self, 'best_val_loss') and self.best_val_loss != float('inf'):
-                print(f"\nStyle-focused training completed! Best validation loss: {self.best_val_loss:.6f}")
+                print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.6f}")
             else:
-                print("\nStyle-focused training completed successfully!")
+                print("\nTraining completed successfully!")
 
 
 def run_distributed_training(rank, world_size, args):
@@ -1945,7 +1726,7 @@ def run_distributed_training(rank, world_size, args):
         print(f"Using torchrun environment: rank={rank}, world_size={world_size}")
 
     # Setup distributed training
-    SAEStyleLatentOptimizer.setup_distributed(rank, world_size)
+    SAEConceptLatentOptimizer.setup_distributed(rank, world_size)
     
     # Create optimizer with local rank as device
     device = torch.device(f"cuda:{rank}")
@@ -1953,11 +1734,10 @@ def run_distributed_training(rank, world_size, args):
     # Empty CUDA cache first
     torch.cuda.empty_cache()
     
-    optimizer = SAEStyleLatentOptimizer(
+    optimizer = SAEConceptLatentOptimizer(
         checkpoint_path=args.checkpoint_path,
         activations_dir=args.activations_dir,
         object_scores_json_path=args.object_scores_json_path,
-        style_scores_json_path=args.style_scores_json_path,
         device=device,
         learning_rate=args.learning_rate,
         num_epochs=args.num_epochs,
@@ -1999,15 +1779,37 @@ def run_distributed_training(rank, world_size, args):
     dist.destroy_process_group()
 
 def main():
-    """Main entry point for the SAE Style-Focused Latent Optimizer."""
-    parser = argparse.ArgumentParser(description="Optimize SAE models for style unlearning with style-priority latent assignments.")
+    """
+    Main entry point for the SAE Object Concept Latent Optimizer.
+    """
+    parser = argparse.ArgumentParser(description="Optimize SAE models to assign specific latents to object concepts.")
     
     # Required parameters
-    parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to the SAE checkpoint directory")
-    parser.add_argument("--activations_dir", type=str, required=True, help="Path to the concept activations directory with style recovery metadata")
-    parser.add_argument("--object_scores_json_path", type=str, required=True, help="Path to the JSON file containing pre-computed object scores")
-    parser.add_argument("--style_scores_json_path", type=str, required=True, help="Path to the JSON file containing pre-computed style scores")
-    parser.add_argument("--activation_column", type=str, default="activations", help="Name of the column containing activations in the dataset")
+    parser.add_argument(
+        "--checkpoint_path", 
+        type=str, 
+        required=True, 
+        help="Path to the SAE checkpoint directory"
+    )
+    parser.add_argument(
+        "--activations_dir", 
+        type=str, 
+        required=True, 
+        help="Path to the concept activations directory with style recovery metadata"
+    )
+    parser.add_argument(
+        "--object_scores_json_path", 
+        type=str, 
+        required=True, 
+        help="Path to the JSON file containing pre-computed object scores"
+    )
+
+    parser.add_argument(
+        "--activation_column", 
+        type=str, 
+        default="activations", 
+        help="Name of the column containing activations in the dataset"
+    )
     
     # Training parameters
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for optimization")
@@ -2018,13 +1820,13 @@ def main():
     parser.add_argument("--validation_split", type=float, default=0.2, help="Fraction of data to use for validation")
     parser.add_argument("--mixed_batches", action="store_true", help="Use batches with mixed concepts for training")
     
-    # Loss weights (style-focused defaults)
+    # Loss weights
     parser.add_argument("--reconstruction_weight", type=float, default=1.0, help="Weight for reconstruction loss")
-    parser.add_argument("--cross_entropy_weight", type=float, default=2.0, help="Weight for cross-entropy loss (higher for style focus)")
+    parser.add_argument("--cross_entropy_weight", type=float, default=1.0, help="Weight for cross-entropy loss")
     parser.add_argument("--sparsity_weight", type=float, default=0.01, help="Weight for sparsity regularization")
     
     # Save parameters
-    parser.add_argument("--save_dir", type=str, default="sae-style-optimized", help="Directory to save optimized models")
+    parser.add_argument("--save_dir", type=str, default="sae-object-concept-optimized", help="Directory to save optimized models")
     
     parser.add_argument("--mixed_precision", action="store_true", help="Use mixed precision (FP16) training")
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count(), help="Number of GPUs to use for distributed training")
@@ -2059,11 +1861,10 @@ def main():
             )
         else:
             # Create and run the optimizer with updated parameters
-            optimizer = SAEStyleLatentOptimizer(
+            optimizer = SAEConceptLatentOptimizer(
                 checkpoint_path=args.checkpoint_path,
                 activations_dir=args.activations_dir,
                 object_scores_json_path=args.object_scores_json_path,
-                style_scores_json_path=args.style_scores_json_path,
                 device=args.device,
                 learning_rate=args.learning_rate,
                 num_epochs=args.num_epochs,
@@ -2083,7 +1884,7 @@ def main():
             )
     
             optimizer.train()
-            print("Style-focused training completed successfully!")
+            print("Training completed successfully!")
 
 
 if __name__ == "__main__":

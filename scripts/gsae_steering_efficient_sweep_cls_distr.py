@@ -143,8 +143,8 @@ class SAEDecoderSteeringHook:
         # Handle classifier-free guidance
         if x.shape[0] % 2 == 0:
             x_uncond, x_cond = x.chunk(2)
-            x_steered = self._apply_steering(x_cond)
-            # x_steered = torch.cat([x_uncond, x_cond_steered], dim=0)
+            x_cond_steered = self._apply_steering(x_cond)
+            x_steered = torch.cat([x_uncond, x_cond_steered], dim=0)  # ✓ Fixed!
         else:
             x_steered = self._apply_steering(x)
         

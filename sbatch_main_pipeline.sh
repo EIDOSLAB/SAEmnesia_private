@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=dual_object_metadata
-#SBATCH --output=sbatch_output/%j_dual_object_metadata.out
-#SBATCH --error=sbatch_output/%j_dual_object_metadata.err
+#SBATCH --job-name=sdxl_activations_collection
+#SBATCH --output=sbatch_output/%j_sdxl_activations_collection.out
+#SBATCH --error=sbatch_output/%j_sdxl_activations_collection.err
 #SBATCH --time=24:00:00              # Increased time limit
 #SBATCH --mem=380G                   # Increased memory
 #SBATCH --partition=boost_usr_prod   # Ensure this is your highest-resource partition
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8           # Increased CPU cores per task
-#SBATCH --account=IscrC_SAOU
+#SBATCH --account=IscrC_INSAIT
 
 # Load any necessary GPU modules (system-specific)
 # module load cuda
@@ -48,16 +48,17 @@ nvidia-smi
 
 # python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/styles_metadata_recovery.py
 # 
-# echo "Running SDXL-Turbo activation collection"
-# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/collect_activations_unlearn_canvas.py \
-# --mode metadata \
-# --hook_names unet.up_blocks.0.attentions.1 \
-# --model_name /leonardo_work/IscrC_SAOU/sdxl-turbo \
-# --new_cached_activations_path /leonardo_scratch/fast/IscrC_SAOU/cassano/finetuning_activations/sdxl_objects \
-# --batch_size 64 \
-# --class_start 0 \
-# --class_end 20 \
-# --organization_type object
+
+echo "Running SDXL-Turbo activation collection"
+accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/collect_activations_unlearn_canvas.py \
+--mode finetuning \
+--hook_names unet.up_blocks.0.attentions.1 \
+--model_name /leonardo_scratch/fast/IscrC_INSAIT/sdxl-turbo \
+--new_cached_activations_path /leonardo_scratch/fast/IscrC_INSAIT/activations/sdxl \
+--batch_size 64 \
+--class_start 0 \
+--class_end 20 \
+--organization_type object
  
 # python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/collect_activations_unlearn_canvas.py \
 # --hook_names unet.up_blocks.1.attentions.1 \
@@ -73,17 +74,15 @@ nvidia-smi
 # --batch_size 128 
 
 # echo "Generating dataset for styles finetuning."
-# accelerate launch --num-processes=2 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/collect_activations_unlearn_canvas.py \
-# --mode finetuning \
+# accelerate launch --num-processes=4 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/collect_activations_unlearn_canvas.py \
+# --mode metadata \
 # --hook_names unet.up_blocks.1.attentions.2 \
 # --model_name /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50 \
-# --new_cached_activations_path /leonardo_work/IscrC_SAOU/styles_finetuning_dataset \
+# --new_cached_activations_path /leonardo_work/IscrC_INSAIT/styles_finetuning_dataset \
 # --batch_size 128 \
 # --class_start 0 \
 # --class_end 50
 # 
-# 
-
 # echo "Dataset collected."
 
 # echo "Generating dataset for nudity finetuning."
@@ -225,31 +224,30 @@ nvidia-smi
 # original_percentiles = [99.99, 99.995, 99.999]
 
 
-#echo "Running step 5.0, phase 1 - Hyperparameter Sweep for Object Unlearning"
-#
-#accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_efficient_sweep_cls_distr.py \
-#--alphas [-1.5,-1.0,-0.9,-0.8,-0.7,-0.6,-0.5,-0.4,-0.2,-0.1]> --seed 188 \
-#--percentiles [99.999] \
-#--output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/gsae_steering/hp_search/seed_188' \
-#--pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
-#--hookpoint 'unet.up_blocks.1.attentions.1' \
-#--class_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/finetuned/v1.6/unet.up_blocks.1.attentions.1/cls_latents_dict_unet.up_blocks.1.attentions.1.pkl' \
-#--sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/wrong/dual_concept_optimized/v1.6/ce_weight_3.0_sparsity_0.01/best' \
-#--steps 100
-#
-#echo "Phase 1 of step 5.0 completed."
-#
-## 
-#echo "Running step 5.0, phase 2 - Hyperparameter Sweep for Object Unlearning"
-#
-#python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_run_acc_all_cls_sweep.py \
-#--percentiles [99.999] \
-#--alphas [-1.1,-1.2,-1.3,-1.5,-1.0,-0.8,-0.7,-0.6,-0.5]> \
-#--input_dir_base /leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/gsae_steering/hp_search/seed_188 \
-#--output_dir_base /leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/gsae_steering/hp_search/seed_188 \
-#--class_ckpt /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth \
-#--batch_size 256 \
-#--seed 188
+# echo "Running step 5.0, phase 1 - Hyperparameter Sweep for Object Unlearning"
+# 
+# accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_efficient_sweep_cls_distr.py \
+# --alphas [-5.0,-4.0,-3.0,-2.0,-1.5] --seed 188 \
+# --percentiles [99.999] \
+# --output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/g_sae/gsae_steering/hp_search/seed_188' \
+# --pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
+# --hookpoint 'unet.up_blocks.1.attentions.1' \
+# --class_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/finetuned/v1.6/unet.up_blocks.1.attentions.1/cls_latents_dict_unet.up_blocks.1.attentions.1.pkl' \
+# --sae_checkpoint '/leonardo_scratch/large/userexternal/ecassano/sae_checkpoints/dual_concept_optimized/g_sae/ce_weight_1.0/best/' \
+# --steps 100
+# 
+# echo "Phase 1 of step 5.0 completed."
+# 
+# echo "Running step 5.0, phase 2 - Hyperparameter Sweep for Object Unlearning"
+# 
+# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_run_acc_all_cls_sweep.py \
+# --percentiles [99.999] \
+# --alphas [-5.0,-4.0,-3.0,-2.0,-1.5] \
+# --input_dir_base /leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/g_sae/gsae_steering/hp_search/seed_188 \
+# --output_dir_base /leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/g_sae/gsae_steering/hp_search/seed_188 \
+# --class_ckpt /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth \
+# --batch_size 256 \
+# --seed 188
 
 # # --script_version v2
 # 
@@ -258,8 +256,8 @@ nvidia-smi
 # 
 # echo "Running step 5.0, phase 3 - Hyperparameter Sweep for Object Unlearning"
 # 
-# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_find_best_params_cls_sweep.py [99.999] [-0.1,-0.2,-0.3,-0.4,-0.5] "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/gsae_steering/hp_search/seed_188" 
-# # 
+# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering_find_best_params_cls_sweep.py [99.999] [-5.0,-4.0,-3.0,-2.0,-1.5] "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/g_sae/gsae_steering/hp_search/seed_188" 
+# 
 # echo "Phase 3 of step 5.0 completed."
 
 # echo "Running step 5.0, phase 3 - Hyperparameter Sweep for Object Unlearning"
@@ -287,6 +285,26 @@ nvidia-smi
 # --sae_checkpoint '/leonardo_work/IscrC_SAOU/cassano/saeuron/sae_checkpoints/dual_concept_optimized/sdxl-turbo/v1.6/ce_weight_3.0_sparsity_0.01/best' \
 # --steps 100 
 
+
+# Images generation with patch replacement for unlearning.
+
+# accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/noise_injection_sample_unlearning_cls_distr.py  \
+# --seed 188 \
+# --output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/noise_injection/seed_188/replace_with_neighbor_padded' \
+# --pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
+# --hookpoint 'unet.up_blocks.1.attentions.1' \
+# --class_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/finetuned/v1.6/unet.up_blocks.1.attentions.1/cls_latents_dict_unet.up_blocks.1.attentions.1.pkl' \
+# --sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/wrong/dual_concept_optimized/v1.6/ce_weight_3.0_sparsity_0.01/best' \
+# --steps 100 \
+# --noise_scale 10.0 \
+# --noise_type gaussian \
+# --use_sae=True \
+# --noise_mode='replace_with_neighbor_padded' \
+# --padding=1 \
+# --start_timestep=99 \
+# --end_timestep=0 \
+# --top_k=1
+
 # G-SAE
 # python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/gsae_steering.py  \
 # --output_dir '/leonardo_work/IscrC_SAOU/cassano/saeuron/sweep_outputs/objects/fine_tuned/gsae' \
@@ -297,7 +315,7 @@ nvidia-smi
 # --alpha=-1.0 \
 # --steps=100 \
 # --gamma=1.0
-#--start_timestep 25
+# -start_timestep 25
 
 # Inferenza G-SAE, checkpoint SAEmnesia
 
@@ -314,15 +332,15 @@ nvidia-smi
 
 # Inferenza come G-SAE, conditional steering. Uso il sae solo se il concetto è presente.
 
-python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/conditional_gsae_steering.py  \
---output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/SAEmnesia_conditional_gsae_steering' \
---pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
---hookpoint 'unet.up_blocks.1.attentions.1' \
---sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/wrong/dual_concept_optimized/v1.6/ce_weight_3.0_sparsity_0.01/best' \
---class_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/finetuned/v1.6/unet.up_blocks.1.attentions.1/cls_latents_dict_unet.up_blocks.1.attentions.1.pkl' \
---class_params_path  /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sweep_outputs/objects/baseline/class_params_-1.5.pth \
---steps=100 \
---gamma=1.0
+# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/conditional_gsae_steering.py  \
+# --output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/SAEmnesia_conditional_gsae_steering' \
+# --pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
+# --hookpoint 'unet.up_blocks.1.attentions.1' \
+# --sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/wrong/dual_concept_optimized/v1.6/ce_weight_3.0_sparsity_0.01/best' \
+# --class_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/finetuned/v1.6/unet.up_blocks.1.attentions.1/cls_latents_dict_unet.up_blocks.1.attentions.1.pkl' \
+# --class_params_path  /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sweep_outputs/objects/baseline/class_params_-1.5.pth \
+# --steps=100 \
+# --gamma=1.0
 
 # accelerate launch scripts/sample_unlearning_cls_distr.py \
 #   --seed 188 \
@@ -367,17 +385,17 @@ python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/
 # 
 # Step 5.2 - Style Unlearning
 
-# echo "Running step 5."
+# echo "Running step 5 for styles."
 # 
-# accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron/scripts/sample_unlearning_distr.py \
+# accelerate launch --num_processes 4 scripts/sample_unlearning_distr.py \
 # --percentile 99.999 \
 # --multiplier -1.0 \
 # --seed 42 \
-# --output_dir '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sweep_outputs/styles/' \
+# --output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/styles/' \
 # --pipe_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diff_models_checkpoints/style50' \
 # --hookpoint 'unet.up_blocks.1.attentions.2' \
 # --style_latents_path '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/features_activations/unet.up_blocks.1.attentions.2/style_latents_dict_unet.up_blocks.1.attentions.2.pkl' \
-# --sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/' \
+# --sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best' \
 # --steps 100
 
 # accelerate launch --num_processes 4 /leonardo/home/userexternal/ecassano/projects/SAeUron/scripts/sample_unlearning_distr.py \
@@ -391,6 +409,7 @@ python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/
 # --sae_checkpoint '/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/style_fine_tuned/style_latent_finetuning_20250418_141014/latest' \
 # --steps 100
 # 
+
 # echo "Step 5 completed."
 
 # Benchmark - Style
@@ -409,17 +428,41 @@ python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/
 
 # Benchmark - Objects
 
-echo "Running evaluations."
+# echo "Running evaluations."
+# 
+# python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/run_acc_all_cls.py \
+# --input_dir "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/noise_injection/seed_188/replace_with_neighbor_padded" \
+# --output_dir "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/noise_injection/seed_188/replace_with_neighbor_padded" \
+# --style_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50.pth" \
+# --class_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth" \
+# --batch_size 128 \
+# --avg_accuracy_input_dir "/leonardo_scratch/large/userexternal/ecassano/v1.6/sweep_outputs/objects/fine_tuned/saeuron/noise_injection/seed_188"
+# 
 
-python /leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/run_acc_all_cls.py \
---input_dir "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/SAEmnesia_conditional_gsae_steering" \
---output_dir "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/SAEmnesia_conditional_gsae_steering" \
---style_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50.pth" \
---class_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth" \
---batch_size 128 \
---avg_accuracy_input_dir "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/SAEmnesia_conditional_gsae_steering"
+# python scripts/run_acc_all_style.py \
+# --input_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/styles/'  \
+# --output_dir '/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/styles/'  \
+# --style_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50.pth" \
+# --class_ckpt "/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth" \
+# --batch_size 128 \
+# --avg_accuracy_input_dir "/leonardo_scratch/large/userexternal/ecassano/v1.6/sweep_outputs/objects/fine_tuned/saeuron/noise_injection/seed_188"
+# 
+# echo "Evaluations completed."
+# 
 
-echo "Evaluations completed."
+# echo "Computing per class metrics."
+# 
+# python scripts/per_class_metrics.py "/leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/noise_injection/seed_188/replace_with_neighbor_padded" --output_file "metrics_results.txt"
+# 
+# echo "Per class metrics computed."
+
+
+
+# echo "Running classifier gradcam"
+# 
+# python scripts/classifier_gradcam.py /leonardo_scratch/large/userexternal/ecassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/noise_injection/seed_188/replace_with_closest/Dogs/Fauvism_Dogs_seed188.jpg --class_ckpt /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/classifier_checkpoints/cls_model/style50_cls.pth
+# 
+# echo "Completed."
 
 
 # Deactivate the virtual environment when done

@@ -38,7 +38,18 @@ def main(input_dir, output_dir, style_ckpt, class_ckpt, batch_size):
         ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues"],
         ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches"],
         ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls"],
-    ]
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame", "Horses"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame", "Horses", "Human"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame", "Horses", "Human", "Rabbits"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame", "Horses", "Human", "Rabbits", "Towers"],
+        ["Bears", "Cats", "Flowers", "Frogs", "Jellyfish", "Sea", "Statues", "Sandwiches", "Waterfalls", "Architectures", "Birds", "Butterfly", "Dogs", "Fishes", "Flame", "Horses", "Human", "Rabbits", "Towers", "Trees"],
+    ] 
     
     run_scripts_sequentially(
         ["_".join(s) for s in sequential_objects_to_unlearn],

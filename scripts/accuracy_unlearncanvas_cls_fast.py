@@ -27,7 +27,7 @@ def main(
     style_ckpt,
     class_ckpt,
     cls=None,
-    seed= [188], # [188, 288, 588, 688, 888],
+    seed= [42], # [188, 288, 588, 688, 888],
     dry_run=False,
     limit_classes=-1,
     batch_size=32,
@@ -124,6 +124,16 @@ def main(
 
         def __getitem__(self, idx):
             img_path = self.image_paths[idx]
+
+            try:
+                image = Image.open(img_path)
+                image = image_transform(image)
+                return image, self.labels[idx]
+            except Exception as e:
+                print(f"Skipping corrupted image: {img_path} - Error: {e}")
+                # Return the next valid image instead
+                return self.__getitem__((idx + 1) % len(self.image_paths))
+
             image = Image.open(img_path)
             image = image_transform(image)
             return image, self.labels[idx]

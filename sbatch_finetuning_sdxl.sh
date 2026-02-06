@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=no_ce_v1.6_sdxl_from_scratch_dual_concept
+#SBATCH --job-name=no_ce_v1.6_sdxl_from_scratch_object_only
 #SBATCH --output=sbatch_output/%j_no_ce_sdxl_from_scratch.out
 #SBATCH --error=sbatch_output/%j_no_ce_sdxl_from_scratch.err
-#SBATCH --account=IscrC_SAOU
+#SBATCH --account=IscrC_INSAIT
 #SBATCH --time=24:00:00
 #SBATCH --mem=300G
 #SBATCH --partition=boost_usr_prod
@@ -88,24 +88,22 @@ df -h /leonardo_scratch/fast/IscrC_MAGNIFY/cassano/
 echo "Temporary files location:"
 df -h /leonardo_work/IscrC_MAGNIFY/cassano/
 
-# Name of the NEW dual concept Python script
-SCRIPT_NAME="/leonardo/home/userexternal/ecassano/projects/SAeUron_finetuning/scripts/old_sae_finetuning_v1.6.py"
+# Name of the object-only Python script
+SCRIPT_NAME="scripts/sdxl_sae_finetuning.py"
 
 # Path to SAE checkpoint directory
 # CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.1.attentions.1"
-CHECKPOINT_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.0.attentions.1"
+CHECKPOINT_PATH="/leonardo_scratch/fast/IscrC_INSAIT/cassano/saeuron/sae_checkpoints/best/unet.up_blocks.0.attentions.1"
 
-# Directory containing concept activations WITH STYLE RECOVERY METADATA
-# This should contain the recovered_object_to_style_index.json file in metadata/
+# Directory containing concept activations (object labels only)
 # ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_MAGNIFY/cassano/finetuning_activations/objects"
-ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_SAOU/cassano/finetuning_activations/sdxl_objects"
+ACTIVATIONS_DIR="/leonardo_scratch/fast/IscrC_INSAIT/activations/sdxl"
 
-# JSON file paths for SEPARATE object and style scores
-OBJECT_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/objects/non_finetuned/scores.json"
-STYLE_SCORES_JSON_PATH="/leonardo_work/IscrC_MAGNIFY/cassano/saeuron/scores/styles/non_finetuned/scores.json"
+# JSON file path for object scores only
+OBJECT_SCORES_JSON_PATH="/leonardo_scratch/fast/IscrC_INSAIT/scores/sdxl/scores.json"
 
 # Directory to save models and logs
-SAVE_DIR="/leonardo_work/IscrC_SAOU/cassano/saeuron/sae_checkpoints/dual_concept_optimized/sdxl-turbo/v1.6/ce_weight_0_sparsity_0.01"
+SAVE_DIR="/leonardo_scratch/fast/IscrC_INSAIT/sae_checkpoints/object_optimized/sdxl-turbo/rec_5_ce_weight_3_sparsity_0.01"
 
 # Make sure directories exist
 mkdir -p ${SAVE_DIR}
@@ -118,34 +116,20 @@ if [ ! -f "${SCRIPT_NAME}" ]; then
     exit 1
 fi
 
-if [ ! -d "${CHECKPOINT_PATH}" ]; then
-    echo "ERROR: SAE checkpoint not found at ${CHECKPOINT_PATH}"
-    exit 1
-fi
+# if [ ! -d "${CHECKPOINT_PATH}" ]; then
+#     echo "ERROR: SAE checkpoint not found at ${CHECKPOINT_PATH}"
+#     exit 1
+# fi
 
 if [ ! -d "${ACTIVATIONS_DIR}" ]; then
     echo "ERROR: Activations directory not found at ${ACTIVATIONS_DIR}"
     exit 1
 fi
 
-# Check for style recovery metadata (corrected path for hookpoint structure)
-# METADATA_PATH="${ACTIVATIONS_DIR}/unet.up_blocks.1.attentions.1/metadata/recovered_object_to_style_index.json"
-METADATA_PATH="${ACTIVATIONS_DIR}/unet.up_blocks.0.attentions.1/metadata/recovered_object_to_style_index.json"
-if [ ! -f "${METADATA_PATH}" ]; then
-    echo "ERROR: Style recovery metadata not found at ${METADATA_PATH}"
-    echo "Please run style recovery first!"
-    exit 1
-fi
-
-if [ ! -f "${OBJECT_SCORES_JSON_PATH}" ]; then
-    echo "ERROR: Object scores JSON not found at ${OBJECT_SCORES_JSON_PATH}"
-    exit 1
-fi
-
-if [ ! -f "${STYLE_SCORES_JSON_PATH}" ]; then
-    echo "ERROR: Style scores JSON not found at ${STYLE_SCORES_JSON_PATH}"
-    exit 1
-fi
+# if [ ! -f "${OBJECT_SCORES_JSON_PATH}" ]; then
+#     echo "ERROR: Object scores JSON not found at ${OBJECT_SCORES_JSON_PATH}"
+#     exit 1
+# fi
 
 echo "✅ All required files found!"
 
@@ -155,22 +139,20 @@ source ../../envs/saeuron_cassano/bin/activate
 # Display GPU info
 nvidia-smi
 
-# Run training with the NEW dual concept script
-echo "Running dual object-style concept training..."
+# Run training with the object-only script
+echo "Running object-only concept training..."
 echo "Object scores: ${OBJECT_SCORES_JSON_PATH}"
-echo "Style scores: ${STYLE_SCORES_JSON_PATH}"
-echo "Activations with styles: ${ACTIVATIONS_DIR}"
+echo "Activations: ${ACTIVATIONS_DIR}"
 echo "Cache directory: ${HF_DATASETS_CACHE}"
 
 torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --checkpoint_path ${CHECKPOINT_PATH} \
     --activations_dir ${ACTIVATIONS_DIR} \
     --object_scores_json_path ${OBJECT_SCORES_JSON_PATH} \
-    --style_scores_json_path ${STYLE_SCORES_JSON_PATH} \
     --device cuda \
     --learning_rate 5e-6 \
-    --num_epochs 150 \
-    --reconstruction_weight 1.0 \
+    --num_epochs 10000 \
+    --reconstruction_weight 5.0 \
     --cross_entropy_weight 3 \
     --sparsity_weight 0.01 \
     --batch_size 128 \
@@ -181,7 +163,7 @@ torchrun --nproc_per_node=4 ${SCRIPT_NAME} \
     --num_gpus 4 \
     --gradient_accumulation_steps 1 \
     --mixed_precision \
-    --patience 5 \
+    --patience 20 \
     --resume \
     --from_scratch \
     --use_float16
@@ -215,9 +197,8 @@ echo ""
 echo "=== TRAINING SUMMARY ==="
 echo "Script: ${SCRIPT_NAME}"
 echo "SAE Checkpoint: ${CHECKPOINT_PATH}"
-echo "Activations (with styles): ${ACTIVATIONS_DIR}"
+echo "Activations: ${ACTIVATIONS_DIR}"
 echo "Object Scores: ${OBJECT_SCORES_JSON_PATH}"
-echo "Style Scores: ${STYLE_SCORES_JSON_PATH}"
 echo "Output Directory: ${SAVE_DIR}"
-echo "Training Type: Dual Object-Style Concept Assignment"
+echo "Training Type: Object-Only Concept Assignment"
 echo "======================="

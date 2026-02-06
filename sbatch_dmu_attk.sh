@@ -1,64 +1,52 @@
 #!/bin/bash
-#SBATCH --job-name=dmu_baseline_evaluation
-#SBATCH --output=sbatch_output/%j_dmu_baseline_evaluation.out
-#SBATCH --error=sbatch_output/%j_dmu_baseline_evaluation.err
-#SBATCH --time=24:00:00              # Increased time limit
-#SBATCH --mem=384G                   # Increased memory
-#SBATCH --partition=boost_usr_prod   # Ensure this is your highest-resource partition
+#SBATCH --job-name=dmu_atk_c%a
+#SBATCH --output=sbatch_output/%j_class_%a_attack_%A.out
+#SBATCH --error=sbatch_output/%j_class_%a_attack_%A.err
+#SBATCH --time=24:00:00
+#SBATCH --mem=96G
+#SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=8           # Increased CPU cores per task
-#SBATCH --account=IscrC_SAOU
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=2
+#SBATCH --account=IscrC_INSAIT
+#SBATCH --array=0-19  # 20 classes (indices 0-19)
 
-# Load any necessary GPU modules (system-specific)
-# module load cuda
+# Get parameters
+ATTACK_IDX=${1:-0}  # Attack index from command line, default 0
+CLASS_IDX=$SLURM_ARRAY_TASK_ID  # Class index from array job
 
+# Load environment
 source ../../envs/saeuron_cassano/bin/activate
 
 # Set PyTorch memory configuration
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+echo "========================================="
+echo "Job started at: $(date)"
+echo "SLURM Job ID: $SLURM_JOB_ID"
+echo "Array Task ID: $SLURM_ARRAY_TASK_ID"
+echo "Attack Index: $ATTACK_IDX"
+echo "Class Index: $CLASS_IDX"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
+echo "========================================="
 nvidia-smi
 
-echo "Running UnlearnDiffAtk."
-
-# Bash loop over variable $i that goes from 0 to 141
 cd Diffusion-MU-Attack
-
-python run_atk_all_cls.py --attack_idx 0 --eval_seed 42 --class_params_path /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/class_params.pth --sampling_step_num 100
-
-# for i in {0..141}
-# do
-#     echo "Running attack_idx: $i"
-#     python run_atk_all_cls.py \
-#         --eval_seed 42 \
-#         --attack_idx $i \
-#         --class_params_path /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/class_params_uniform_99.999_-1.0.pth \
-#         --sampling_step_num 100 \
-# done
-# 
-
-echo "UnlearnDiffAtk completed."
-
-echo "Computing average accuracy difference."
+# --class_params_path /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sweep_outputs/objects/baseline/class_params.pth \
+python run_atk_all_cls.py \
+    --eval_seed 42 \
+    --attack_idx $ATTACK_IDX \
+    --class_params_path /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/sweep_outputs/objects/fine_tuned/v1.6/hp_search/seed_188/class_params.pth \
+    --class_idx $CLASS_IDX \
+    --sampling_step_num 100
 
 cd ..
 
-python scripts/avg_accuracy_cls_diffatk.py \
-    --input_dir /leonardo_work/IscrC_MAGNIFY/cassano/saeuron/diffatk_eval/baseline \
-    --attk_idxs [0]
-
-# echo "UnlearnDiffAtk completed."
-#     --attk_idxs $(seq 0 141)
-
-# --attack_idx <idx> \
-
-
-
-# Deactivate the virtual environment when done
+# Deactivate the virtual environment
 deactivate
 
-echo "Job completed."
-echo "End time: $(date)"
+echo "========================================="
+echo "Job completed at: $(date)"
+echo "Class index $CLASS_IDX finished"
+echo "========================================="
