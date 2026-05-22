@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SAEmnesia: Supervised Sparse Autoencoder Finetuning for Concept Unlearning</title>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --accent: #2b5caa;
+      --accent-light: #e8eef8;
+      --text: #222;
+      --muted: #555;
+      --border: #dde3ed;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Source Sans Pro', Helvetica Neue, Arial, sans-serif;
+      color: var(--text);
+      background: #fff;
+      line-height: 1.65;
+    }
+
+    /* ── HEADER ── */
+    header {
+      background: linear-gradient(135deg, #1a3a6e 0%, #2b5caa 100%);
+      color: #fff;
+      padding: 56px 24px 48px;
+      text-align: center;
+    }
+    header .badge {
+      display: inline-block;
+      background: rgba(255,255,255,0.18);
+      border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 20px;
+      padding: 4px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 22px;
+    }
+    header h1 {
+      font-size: clamp(1.6rem, 3.5vw, 2.6rem);
+      font-weight: 700;
+      max-width: 860px;
+      margin: 0 auto 20px;
+      line-height: 1.3;
+    }
+    .authors {
+      font-size: 1.05rem;
+      margin-bottom: 8px;
+      opacity: 0.95;
+    }
+    .authors a { color: #b8d0ff; text-decoration: none; }
+    .authors a:hover { text-decoration: underline; }
+    .affiliation {
+      font-size: 0.9rem;
+      opacity: 0.75;
+      margin-bottom: 28px;
+    }
+    .header-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      background: rgba(255,255,255,0.15);
+      border: 1.5px solid rgba(255,255,255,0.5);
+      color: #fff;
+      border-radius: 8px;
+      padding: 9px 20px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: rgba(255,255,255,0.28); }
+    .btn svg { width: 18px; height: 18px; fill: currentColor; }
+
+    /* ── MAIN LAYOUT ── */
+    main { max-width: 960px; margin: 0 auto; padding: 0 24px 80px; }
+
+    section { margin-top: 56px; }
+    section h2 {
+      font-size: 1.55rem;
+      font-weight: 700;
+      color: var(--accent);
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 8px;
+      margin-bottom: 20px;
+    }
+    section h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin: 24px 0 8px;
+    }
+    p { margin-bottom: 14px; color: var(--muted); }
+
+    /* ── ABSTRACT BOX ── */
+    .abstract-box {
+      background: var(--accent-light);
+      border-left: 4px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 20px 24px;
+      color: var(--text);
+      font-size: 1.0rem;
+    }
+
+    /* ── KEY PROPERTIES ── */
+    .key-props {
+      list-style: none;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 14px;
+      margin-top: 20px;
+    }
+    .key-props li {
+      background: #f5f8ff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-size: 0.92rem;
+      color: var(--text);
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .key-props li::before {
+      content: "✓";
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 1rem;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    /* ── IMAGES ── */
+    .figure {
+      text-align: center;
+      margin: 28px 0;
+    }
+    .figure img {
+      max-width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    }
+    .figure figcaption {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    /* ── RESULTS TABLE ── */
+    .table-wrapper {
+      overflow-x: auto;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      min-width: 720px;
+    }
+    thead tr { background: var(--accent); color: #fff; }
+    thead th {
+      padding: 10px 12px;
+      font-weight: 600;
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+    thead tr.subhead { background: #3d6ec2; }
+    thead tr.metric  { background: #4d7ed2; }
+    tbody tr:nth-child(odd)  { background: #fafbfd; }
+    tbody tr:nth-child(even) { background: #fff; }
+    tbody tr.ours { background: #eef3ff !important; font-weight: 700; }
+    tbody tr:hover { background: #e5ecfb !important; }
+    tbody td {
+      padding: 9px 12px;
+      text-align: center;
+      border: 1px solid var(--border);
+    }
+    tbody td:first-child { text-align: left; font-weight: 500; padding-left: 14px; }
+    .best  { font-weight: 800; color: #1a3a6e; }
+    .second { text-decoration: underline; }
+    .table-caption {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin-top: 10px;
+      text-align: center;
+    }
+
+    /* ── TRAINING DETAILS ── */
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .detail-card {
+      background: #f5f8ff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+    .detail-card .val {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .detail-card .lbl {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* ── CODE BLOCKS ── */
+    pre {
+      background: #1e2433;
+      color: #cdd6f4;
+      border-radius: 10px;
+      padding: 18px 20px;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      margin: 12px 0 20px;
+      position: relative;
+    }
+    code { font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; }
+    .copy-btn {
+      position: absolute;
+      top: 10px; right: 12px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #cdd6f4;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .copy-btn:hover { background: rgba(255,255,255,0.22); }
+
+    /* ── CITATION ── */
+    .bibtex-box { position: relative; }
+
+    /* ── FOOTER ── */
+    footer {
+      margin-top: 80px;
+      border-top: 1px solid var(--border);
+      padding: 28px 24px;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════ HEADER -->
+<header>
+  <div class="badge">ICML 2026</div>
+  <h1>SAEmnesia: Supervised Sparse Autoencoder Finetuning for Concept Unlearning in Diffusion Models</h1>
+
+  <!-- TODO: replace with actual author names -->
+  <p class="authors">
+    Author One<sup>1</sup>&nbsp;&nbsp;
+    Author Two<sup>1</sup>&nbsp;&nbsp;
+    Author Three<sup>2</sup>
+  </p>
+  <p class="affiliation">
+    <sup>1</sup>University / Institution One &nbsp;&nbsp;
+    <sup>2</sup>University / Institution Two
+  </p>
+
+  <div class="header-links">
+    <!-- TODO: replace hrefs with real links once available -->
+    <a class="btn" href="https://arxiv.org/abs/XXXX.XXXXX" target="_blank">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm1 7V3.5L18.5 9H15zm-1 2h3v2h-3v2h3v2h-3v2H8v-2h3v-2H8v-2h3v-2H8V9h6v2z"/></svg>
+      Paper
+    </a>
+    <a class="btn" href="https://github.com/YOUR_USERNAME/SAEmnesia" target="_blank">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.419 2.865 8.166 6.839 9.489.5.09.682-.218.682-.484 0-.236-.009-.866-.013-1.699-2.782.602-3.369-1.34-3.369-1.34-.455-1.157-1.11-1.465-1.11-1.465-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.891 1.529 2.341 1.089 2.91.833.091-.647.349-1.086.635-1.337-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.269 2.75 1.025A9.56 9.56 0 0 1 12 6.836a9.59 9.59 0 0 1 2.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.378.203 2.394.1 2.647.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.307.678.917.678 1.852 0 1.335-.012 2.415-.012 2.741 0 .269.18.579.688.481C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
+      Code
+    </a>
+    <a class="btn" href="https://huggingface.co/leno3003/SAEmnesia" target="_blank">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+      Model (HuggingFace)
+    </a>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════ MAIN -->
+<main>
+
+  <!-- ABSTRACT -->
+  <section id="abstract">
+    <h2>Abstract</h2>
+    <div class="abstract-box">
+      SAEmnesia fine-tunes a pre-trained Sparse Autoencoder (SAE) with a supervised cross-entropy objective that assigns dedicated latent neurons to specific concepts. At inference time, suppressing those neurons selectively erases the target concept from the diffusion model's generation, <strong>without retraining the diffusion model itself</strong>.
+      Standard SAE-based unlearning (e.g., SAeUron) relies on unsupervised latent features that may be entangled with multiple concepts. SAEmnesia supervises the SAE with a concept-assignment loss during finetuning, enforcing that a dedicated set of latent neurons fires exclusively for the concept to be erased. At inference time, steering those neurons toward zero suppresses the concept cleanly.
+    </div>
+
+    <ul class="key-props">
+      <li>No diffusion model retraining — only the SAE weights are updated</li>
+      <li>Concept-specific latent assignment via cross-entropy supervision</li>
+      <li>Evaluated on the UnlearnCanvas benchmark (objects &amp; styles)</li>
+      <li>Robustness tested against adversarial re-learning attacks</li>
+    </ul>
+  </section>
+
+  <!-- OVERVIEW IMAGES -->
+  <section id="overview">
+    <h2>Overview</h2>
+    <figure class="figure">
+      <img src="teaser_saemnesia_cvpr-1.png" alt="SAEmnesia Teaser"/>
+      <figcaption>Figure 1 — SAEmnesia concept unlearning in diffusion models. Suppressing dedicated SAE neurons at inference selectively erases a target concept without any diffusion model retraining.</figcaption>
+    </figure>
+
+    <figure class="figure">
+      <img src="pipeline_saemnesia-1.png" alt="SAEmnesia Pipeline"/>
+      <figcaption>Figure 2 — Full pipeline: supervised SAE finetuning assigns concept-specific neurons; at inference, those neurons are steered toward zero to erase the concept.</figcaption>
+    </figure>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="results">
+    <h2>Results</h2>
+    <p>Evaluation of <strong>SAEmnesia</strong> against state-of-the-art methods on style and object unlearning on the UnlearnCanvas benchmark. Best results are in <strong>bold</strong>, second-best are <u>underlined</u>.</p>
+
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th rowspan="3">Method</th>
+            <th colspan="6">Effectiveness</th>
+            <th rowspan="2">Avg. ↑</th>
+            <th rowspan="2">FID ↓</th>
+            <th colspan="2">Efficiency</th>
+          </tr>
+          <tr class="subhead">
+            <th colspan="3">Style Unlearning</th>
+            <th colspan="3">Object Unlearning</th>
+            <th>Memory (GB) ↓</th>
+            <th>Storage (GB) ↓</th>
+          </tr>
+          <tr class="metric">
+            <th>UA ↑</th>
+            <th>IRA ↑</th>
+            <th>CRA ↑</th>
+            <th>UA ↑</th>
+            <th>IRA ↑</th>
+            <th>CRA ↑</th>
+            <th></th>
+            <th></th>
+            <th></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>ESD</td>
+            <td class="best">98.58</td>
+            <td>80.97</td>
+            <td>93.96</td>
+            <td>92.15</td>
+            <td>55.78</td>
+            <td>44.23</td>
+            <td>77.61</td>
+            <td>65.55</td>
+            <td>17.8</td>
+            <td>4.3</td>
+          </tr>
+          <tr>
+            <td>FMN</td>
+            <td>88.48</td>
+            <td>56.77</td>
+            <td>46.60</td>
+            <td>45.64</td>
+            <td>90.63</td>
+            <td>73.46</td>
+            <td>66.93</td>
+            <td>131.37</td>
+            <td>17.9</td>
+            <td>4.2</td>
+          </tr>
+          <tr>
+            <td>UCE</td>
+            <td class="second">98.40</td>
+            <td>60.22</td>
+            <td>47.71</td>
+            <td class="second">94.31</td>
+            <td>39.35</td>
+            <td>34.67</td>
+            <td>62.45</td>
+            <td>182.01</td>
+            <td class="second">5.1</td>
+            <td>1.7</td>
+          </tr>
+          <tr>
+            <td>CA</td>
+            <td>60.82</td>
+            <td>96.01</td>
+            <td>92.70</td>
+            <td>46.67</td>
+            <td>90.11</td>
+            <td>81.97</td>
+            <td>78.05</td>
+            <td class="best">54.21</td>
+            <td>10.1</td>
+            <td>4.2</td>
+          </tr>
+          <tr>
+            <td>SalUn</td>
+            <td>86.26</td>
+            <td>90.39</td>
+            <td>95.08</td>
+            <td>86.91</td>
+            <td class="best">96.35</td>
+            <td class="best">99.59</td>
+            <td class="second">92.43</td>
+            <td>61.05</td>
+            <td>30.8</td>
+            <td>4.0</td>
+          </tr>
+          <tr>
+            <td>SEOT</td>
+            <td>56.90</td>
+            <td>94.68</td>
+            <td>84.31</td>
+            <td>23.25</td>
+            <td class="second">95.57</td>
+            <td>82.71</td>
+            <td>72.91</td>
+            <td>62.38</td>
+            <td>7.34</td>
+            <td class="best">0.0</td>
+          </tr>
+          <tr>
+            <td>SPM</td>
+            <td>60.94</td>
+            <td>92.39</td>
+            <td>84.33</td>
+            <td>71.25</td>
+            <td>90.79</td>
+            <td>81.65</td>
+            <td>80.23</td>
+            <td>59.79</td>
+            <td>6.9</td>
+            <td class="best">0.0</td>
+          </tr>
+          <tr>
+            <td>EDiff</td>
+            <td>92.42</td>
+            <td>73.91</td>
+            <td>98.93</td>
+            <td>86.67</td>
+            <td>94.03</td>
+            <td>48.48</td>
+            <td>82.41</td>
+            <td>81.42</td>
+            <td>27.8</td>
+            <td>4.0</td>
+          </tr>
+          <tr>
+            <td>SHS</td>
+            <td>95.84</td>
+            <td>80.42</td>
+            <td>43.27</td>
+            <td>80.73</td>
+            <td>81.15</td>
+            <td>67.99</td>
+            <td>74.90</td>
+            <td>119.34</td>
+            <td>31.2</td>
+            <td>4.0</td>
+          </tr>
+          <tr>
+            <td>SAeUron</td>
+            <td>95.80</td>
+            <td class="best">99.10</td>
+            <td class="best">99.40</td>
+            <td>87.16</td>
+            <td>85.57</td>
+            <td>74.14</td>
+            <td>90.10</td>
+            <td>62.69</td>
+            <td class="best">2.8</td>
+            <td class="second">0.2</td>
+          </tr>
+          <tr class="ours">
+            <td>SAEmnesia (ours)</td>
+            <td>96.60</td>
+            <td class="second">98.67</td>
+            <td class="second">99.30</td>
+            <td class="best">94.65</td>
+            <td>91.39</td>
+            <td class="second">88.48</td>
+            <td class="best">94.85</td>
+            <td class="second">56.15</td>
+            <td class="best">2.8</td>
+            <td class="second">0.2</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="table-caption">Table 1 — UA: Unlearning Accuracy (higher = better erasure). IRA: In-Domain Retention Accuracy. CRA: Cross-Domain Retention Accuracy. FID measures image quality. Memory and Storage reflect inference overhead.</p>
+  </section>
+
+  <!-- TRAINING DETAILS -->
+  <section id="training-details">
+    <h2>Training Details</h2>
+    <p>We trained a TopK SAE with k = 32 and an expansion factor of 16, optimized with Adam.</p>
+    <div class="detail-grid">
+      <div class="detail-card"><div class="val">TopK</div><div class="lbl">SAE Type</div></div>
+      <div class="detail-card"><div class="val">k = 32</div><div class="lbl">Sparsity (TopK)</div></div>
+      <div class="detail-card"><div class="val">×16</div><div class="lbl">Expansion Factor</div></div>
+      <div class="detail-card"><div class="val">5e‑6</div><div class="lbl">Learning Rate</div></div>
+      <div class="detail-card"><div class="val">128</div><div class="lbl">Batch Size</div></div>
+      <div class="detail-card"><div class="val">150</div><div class="lbl">Max Epochs</div></div>
+      <div class="detail-card"><div class="val">5</div><div class="lbl">Early Stop Patience</div></div>
+      <div class="detail-card"><div class="val">Adam</div><div class="lbl">Optimizer</div></div>
+    </div>
+  </section>
+
+  <!-- QUICK START -->
+  <section id="quickstart">
+    <h2>Quick Start</h2>
+
+    <h3>1. Install dependencies</h3>
+    <pre><code>pip install uv
+uv venv --python 3.10
+source .venv/bin/activate
+uv pip install -r requirements.txt</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+    <h3>2. Load the pretrained checkpoint from HuggingFace</h3>
+    <p>The fine-tuned SAEmnesia checkpoint is available on <a href="https://huggingface.co/leno3003/SAEmnesia" target="_blank">HuggingFace</a>. Load it and skip pipeline steps 1–3:</p>
+    <pre><code>from SAE.sae import Sae
+sae = Sae.load_from_hub("leno3003/SAEmnesia")
+sae.save_to_disk("sae-ckpts/unet.up_blocks.1.attentions.1")</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+    <h3>3. Generate unlearned images</h3>
+    <pre><code>accelerate launch --num_processes 4 scripts/sample_unlearning_cls_distr.py \
+  --seed 188 \
+  --output_dir &lt;path/to/output/images&gt; \
+  --class_params_path &lt;path/to/class_params.pth&gt; \
+  --pipe_checkpoint &lt;path/to/diffusion/model&gt; \
+  --hookpoint unet.up_blocks.1.attentions.1 \
+  --class_latents_path &lt;path/to/feature/activations.pkl&gt; \
+  --sae_checkpoint &lt;path/to/finetuned/sae&gt; \
+  --steps 100</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+  </section>
+
+  <!-- CITATION -->
+  <section id="citation">
+    <h2>Citation</h2>
+    <p>If you find SAEmnesia useful in your research, please cite:</p>
+    <div class="bibtex-box">
+      <pre><code id="bibtex">@inproceedings{saemnesia2026,
+  title     = {SAEmnesia: Supervised Sparse Autoencoder Finetuning
+               for Concept Unlearning in Diffusion Models},
+  author    = {Author One and Author Two and Author Three},
+  booktitle = {Proceedings of the 43rd International Conference on
+               Machine Learning (ICML)},
+  year      = {2026},
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+  </section>
+
+</main>
+
+<!-- FOOTER -->
+<footer>
+  Website template inspired by <a href="https://gaussians-on-demand.github.io/" target="_blank">Gaussians on Demand</a>.
+  &nbsp;·&nbsp; Published at ICML 2026.
+</footer>
+
+<script>
+function copyCode(btn) {
+  const pre = btn.closest('pre');
+  const code = pre.querySelector('code');
+  navigator.clipboard.writeText(code.innerText).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = orig, 2000);
+  });
+}
+</script>
+
+</body>
+</html>

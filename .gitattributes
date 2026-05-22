@@ -1,0 +1,1 @@
+demo_images/**/*.png !text !filter !merge !diff
