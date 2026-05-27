@@ -247,6 +247,100 @@
     /* ── CITATION ── */
     .bibtex-box { position: relative; }
 
+    /* ── INTERACTIVE DEMO ── */
+    .demo-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 14px;
+      margin: 24px 0 28px;
+    }
+    .demo-ctrl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .demo-ctrl-group label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .demo-ctrl-group select {
+      appearance: none;
+      -webkit-appearance: none;
+      background: #f5f8ff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%232b5caa' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 10px center;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 32px 8px 12px;
+      font-size: 0.9rem;
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color 0.2s;
+      font-family: inherit;
+    }
+    .demo-ctrl-group select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .demo-images {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+    @media (max-width: 640px) {
+      .demo-images { grid-template-columns: 1fr; }
+    }
+    .demo-card {
+      background: #f5f8ff;
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .demo-card-header {
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.88rem;
+      font-weight: 700;
+      padding: 8px 14px;
+      text-align: center;
+      letter-spacing: 0.03em;
+    }
+    .demo-card-header.saeuron  { background: #5a7ec2; }
+    .demo-card-header.saemnesia { background: #1a3a6e; }
+    .demo-card img {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      display: block;
+      background: #dde3ed;
+    }
+    .demo-card-footer {
+      padding: 8px 12px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: center;
+      border-top: 1px solid var(--border);
+    }
+    .demo-status {
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 10px;
+      min-height: 1.4em;
+    }
+    .demo-info-box {
+      background: var(--accent-light);
+      border-left: 4px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 18px;
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
     /* ── FOOTER ── */
     footer {
       margin-top: 80px;
@@ -508,6 +602,92 @@
     <p class="table-caption">Table 1 — UA: Unlearning Accuracy (higher = better erasure). IRA: In-Domain Retention Accuracy. CRA: Cross-Domain Retention Accuracy. FID measures image quality. Memory and Storage reflect inference overhead.</p>
   </section>
 
+  <!-- INTERACTIVE DEMO -->
+  <section id="demo">
+    <h2>Interactive Demo</h2>
+    <p>Compare the base diffusion model with SAEuron and SAEmnesia on pre-generated examples. Select a subject, artistic style, concept to suppress, start timestep, and multiplier strength to explore how each method handles concept unlearning.</p>
+
+    <div class="demo-info-box">
+      All images are pre-generated offline. The prompt used is <em>"An image of {Object} in {Style} style."</em>
+      <strong>Optimal</strong> uses each method's own best-known negative multiplier for the selected concept.
+      Other values apply the same multiplier to both methods for a direct comparison.
+    </div>
+
+    <div class="demo-controls">
+      <div class="demo-ctrl-group">
+        <label for="demo-obj">Object to Generate</label>
+        <select id="demo-obj"><!-- populated by JS --></select>
+      </div>
+      <div class="demo-ctrl-group">
+        <label for="demo-style">Style</label>
+        <select id="demo-style">
+          <option value="cartoon">Cartoon</option>
+          <option value="watercolor">Watercolor</option>
+          <option value="van_gogh">Van Gogh</option>
+        </select>
+      </div>
+      <div class="demo-ctrl-group">
+        <label for="demo-unlearn">Concept to Unlearn</label>
+        <select id="demo-unlearn">
+          <option value="none">None (baseline)</option>
+          <option value="architectures">Architectures</option>
+          <option value="bears">Bears</option>
+          <option value="birds">Birds</option>
+          <option value="butterfly">Butterfly</option>
+          <option value="cats">Cats</option>
+          <option value="dogs">Dogs</option>
+          <option value="fishes">Fishes</option>
+          <option value="flame">Flame</option>
+          <option value="flowers">Flowers</option>
+          <option value="frogs">Frogs</option>
+          <option value="horses">Horses</option>
+          <option value="human">Human</option>
+          <option value="jellyfish">Jellyfish</option>
+          <option value="rabbits">Rabbits</option>
+          <option value="sandwiches">Sandwiches</option>
+          <option value="sea">Sea</option>
+          <option value="statues">Statues</option>
+          <option value="towers">Towers</option>
+          <option value="trees">Trees</option>
+          <option value="waterfalls">Waterfalls</option>
+        </select>
+      </div>
+      <div class="demo-ctrl-group">
+        <label for="demo-ts">Timestep range</label>
+        <select id="demo-ts">
+          <option value="tfull" selected>Full (all steps)</option>
+          <option value="t25">Half (steps 25→0)</option>
+        </select>
+      </div>
+      <div class="demo-ctrl-group">
+        <label for="demo-mult">Multiplier</label>
+        <select id="demo-mult">
+          <option value="optimal" selected>Optimal (per method)</option>
+          <option value="m10">−10 (both methods)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="demo-images">
+      <div class="demo-card">
+        <div class="demo-card-header">Base Model</div>
+        <img id="img-base" src="" alt="Base model output" onerror="this.src=demoPlaceholder()"/>
+        <div class="demo-card-footer" id="footer-base">Diffusion model — no SAE intervention</div>
+      </div>
+      <div class="demo-card">
+        <div class="demo-card-header saeuron">SAEuron</div>
+        <img id="img-saeuron" src="" alt="SAEuron output" onerror="this.src=demoPlaceholder()"/>
+        <div class="demo-card-footer" id="footer-saeuron">Unsupervised SAE-based unlearning</div>
+      </div>
+      <div class="demo-card">
+        <div class="demo-card-header saemnesia">SAEmnesia (ours)</div>
+        <img id="img-saemnesia" src="" alt="SAEmnesia output" onerror="this.src=demoPlaceholder()"/>
+        <div class="demo-card-footer" id="footer-saemnesia">Supervised SAE finetuning — precise concept removal</div>
+      </div>
+    </div>
+    <div class="demo-status" id="demo-status"></div>
+  </section>
+
   <!-- TRAINING DETAILS -->
   <section id="training-details">
     <h2>Training Details</h2>
@@ -564,6 +744,126 @@ function copyCode(btn) {
     setTimeout(() => btn.textContent = orig, 2000);
   });
 }
+
+// ── Interactive Demo ──────────────────────────────────────────────────────────
+
+// Per-concept optimal multipliers (must match generate_demo_images.py)
+const OPTIMAL_SAEMNESIA = {
+  architectures:-5,  bears:-20, birds:-5,  butterfly:-5,
+  cats:-15,          dogs:-5,   fishes:-5, flame:-1,
+  flowers:-5,        frogs:-15, horses:-20,human:-5,
+  jellyfish:-1,      rabbits:-5,sandwiches:-15,sea:-5,
+  statues:-20,       towers:-5, trees:-5,  waterfalls:-5,
+};
+const OPTIMAL_SAEURON = {
+  architectures:-30, bears:-5,  birds:-5,  butterfly:-5,
+  cats:-30,          dogs:-15,  fishes:-30,flame:-30,
+  flowers:-20,       frogs:-30, horses:-20,human:-5,
+  jellyfish:-1,      rabbits:-10,sandwiches:-10,sea:-5,
+  statues:-5,        towers:-1, trees:-20, waterfalls:-1,
+};
+
+// Objects available per unlearn target (must match generate_demo_images.py)
+const COMPANIONS = ['dogs', 'cats', 'birds', 'flowers', 'horses'];
+const ALL_OBJECTS = [
+  'architectures','bears','birds','butterfly','cats',
+  'dogs','fishes','flame','flowers','frogs',
+  'horses','human','jellyfish','rabbits','sandwiches',
+  'sea','statues','towers','trees','waterfalls',
+];
+const DISPLAY_NAME = {
+  architectures:'Architectures', bears:'Bears', birds:'Birds', butterfly:'Butterfly',
+  cats:'Cats', dogs:'Dogs', fishes:'Fishes', flame:'Flame', flowers:'Flowers',
+  frogs:'Frogs', horses:'Horses', human:'Human', jellyfish:'Jellyfish',
+  rabbits:'Rabbits', sandwiches:'Sandwiches', sea:'Sea', statues:'Statues',
+  towers:'Towers', trees:'Trees', waterfalls:'Waterfalls',
+};
+
+function objectsForUnlearn(unlearn) {
+  if (unlearn === 'none') return COMPANIONS;
+  // unlearn target first, then companions (deduped)
+  return [...new Set([unlearn, ...COMPANIONS])];
+}
+
+function populateObjDropdown(unlearn) {
+  const sel = document.getElementById('demo-obj');
+  const prev = sel.value;
+  const available = objectsForUnlearn(unlearn);
+  sel.innerHTML = available
+    .map(v => `<option value="${v}">${DISPLAY_NAME[v]}</option>`)
+    .join('');
+  // Keep previous selection if still available, otherwise default to unlearn target
+  if (available.includes(prev)) {
+    sel.value = prev;
+  } else {
+    sel.value = unlearn !== 'none' ? unlearn : available[0];
+  }
+}
+
+function demoPlaceholder() {
+  return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Crect width='512' height='512' fill='%23dde3ed'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='22' fill='%23888'%3ENot available%3C/text%3E%3C/svg%3E";
+}
+
+function updateDemo() {
+  const obj     = document.getElementById('demo-obj').value;
+  const style   = document.getElementById('demo-style').value;
+  const unlearn = document.getElementById('demo-unlearn').value;
+  const ts      = document.getElementById('demo-ts').value;
+  const mult    = document.getElementById('demo-mult').value;
+
+  const imgBase    = document.getElementById('img-base');
+  const imgSaeuron = document.getElementById('img-saeuron');
+  const imgSaemn   = document.getElementById('img-saemnesia');
+  const status     = document.getElementById('demo-status');
+  const footerSaeuron = document.getElementById('footer-saeuron');
+  const footerSaemn   = document.getElementById('footer-saemnesia');
+
+  const root    = 'demo_images';
+  const baseSrc = `${root}/${obj}/${style}/base.png`;
+  const multDir = `${root}/${obj}/${style}/${unlearn}/${ts}/${mult}`;
+
+  [imgBase, imgSaeuron, imgSaemn].forEach(img => { img.src = ''; });
+  imgBase.src    = baseSrc;
+  imgSaeuron.src = `${multDir}/saeuron.png`;
+  imgSaemn.src   = `${multDir}/saemnesia.png`;
+
+  let saeuronMult, saemnMult;
+  if (mult === 'optimal') {
+    saeuronMult = unlearn === 'none' ? 0 : (OPTIMAL_SAEURON[unlearn]  ?? '?');
+    saemnMult   = unlearn === 'none' ? 0 : (OPTIMAL_SAEMNESIA[unlearn] ?? '?');
+    footerSaeuron.textContent = `Unsupervised SAE-based unlearning  ·  multiplier ${saeuronMult}`;
+    footerSaemn.textContent   = `Supervised SAE finetuning  ·  multiplier ${saemnMult}`;
+  } else {
+    const val = -parseInt(mult.replace('m', ''), 10);
+    footerSaeuron.textContent = `Unsupervised SAE-based unlearning  ·  multiplier ${val}`;
+    footerSaemn.textContent   = `Supervised SAE finetuning  ·  multiplier ${val}`;
+  }
+
+  const unlLabel  = unlearn === 'none' ? 'none' : unlearn;
+  const tsLabel   = ts === 'tfull' ? 'full run' : 'steps 25→0';
+  const multLabel = mult === 'optimal'
+    ? `optimal (SAEuron ${saeuronMult ?? ''} / SAEmnesia ${saemnMult ?? ''})`
+    : mult.replace('m', '−');
+  status.textContent =
+    `Prompt: "An image of ${DISPLAY_NAME[obj] ?? obj} in ${style} style."  ·  `
+    + `Unlearn: ${unlLabel}  ·  Timestep: ${tsLabel}  ·  Multiplier: ${multLabel}`;
+}
+
+// When the unlearn target changes: repopulate objects, reset to optimal, update images
+document.getElementById('demo-unlearn').addEventListener('change', () => {
+  const unlearn = document.getElementById('demo-unlearn').value;
+  populateObjDropdown(unlearn);
+  document.getElementById('demo-mult').value = 'optimal';
+  updateDemo();
+});
+
+document.querySelectorAll('#demo select:not(#demo-unlearn)').forEach(sel =>
+  sel.addEventListener('change', updateDemo)
+);
+
+// Initialise object dropdown then render
+populateObjDropdown(document.getElementById('demo-unlearn').value);
+updateDemo();
 </script>
 
 </body>

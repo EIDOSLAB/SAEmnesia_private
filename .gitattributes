@@ -1,1 +1,2 @@
+demo_images/**/*.png filter=lfs diff=lfs merge=lfs -text
 demo_images/**/*.png !text !filter !merge !diff
