@@ -657,6 +657,8 @@
         <label for="demo-mult">Multiplier</label>
         <select id="demo-mult">
           <option value="optimal" selected>Optimal (per method)</option>
+          <option value="m1">−1 (both methods)</option>
+          <option value="m5">−5 (both methods)</option>
           <option value="m10">−10 (both methods)</option>
         </select>
       </div>
@@ -812,9 +814,8 @@ function updateDemo() {
   const footerSaeuron = document.getElementById('footer-saeuron');
   const footerSaemn   = document.getElementById('footer-saemnesia');
 
-  const root    = 'demo_images';
-  const baseSrc = `${root}/${obj}/${style}/base.png`;
-  const multDir = `${root}/${obj}/${style}/${unlearn}/${ts}/${mult}`;
+  const baseSrc = `${obj}/${style}/base.png`;
+  const multDir = `${obj}/${style}/${unlearn}/${ts}/${mult}`;
 
   [imgBase, imgSaeuron, imgSaemn].forEach(img => { img.src = ''; });
   imgBase.src    = baseSrc;

@@ -69,8 +69,8 @@ UNLEARN_TARGETS = ["None"] + ALL_OBJECTS
 # start_timestep is 0-based (0–steps-1). None = full run (leave blank in UI).
 TIMESTEPS = [None, 25]
 
-# One extra shared multiplier (in addition to optimal)
-SHARED_MULTIPLIERS = [-10.0]
+# Shared multipliers (in addition to optimal)
+SHARED_MULTIPLIERS = [-1.0, -5.0, -10.0]
 
 # Per-concept optimal multipliers (from the demo app frontend)
 OPTIMAL_SAEMNESIA = {
@@ -205,7 +205,7 @@ def build_combos(styles, unlearn_targets, timesteps):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--output-dir", default="demo_images")
+    parser.add_argument("--output-dir", default=".")
     parser.add_argument("--delay", type=float, default=1.0)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
