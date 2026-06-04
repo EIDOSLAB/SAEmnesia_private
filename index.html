@@ -7,24 +7,28 @@
   <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&display=swap" rel="stylesheet"/>
   <style>
     :root {
-      --accent: #2b5caa;
-      --accent-light: #e8eef8;
-      --text: #222;
-      --muted: #555;
-      --border: #dde3ed;
+      --accent: #7ed957;
+      --accent-dark: #5ebd3a;
+      --accent-deep: #3f8f2e;
+      --accent-light: #f1f8ed;
+      --text: #373737;
+      --muted: #55514a;
+      --bg: #e8e3d6;
+      --surface: #f4f0e6;
+      --border: #d4cdc0;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: 'Source Sans Pro', Helvetica Neue, Arial, sans-serif;
       color: var(--text);
-      background: #fff;
+      background: var(--bg);
       line-height: 1.65;
     }
 
     /* ── HEADER ── */
     header {
-      background: linear-gradient(135deg, #1a3a6e 0%, #2b5caa 100%);
+      background: linear-gradient(135deg, #373737 0%, #5ea746 56%, #7ed957 100%);
       color: #fff;
       padding: 56px 24px 48px;
       text-align: center;
@@ -53,12 +57,41 @@
       margin-bottom: 8px;
       opacity: 0.95;
     }
-    .authors a { color: #b8d0ff; text-decoration: none; }
+    .authors strong { font-weight: 700; }
+    .authors a { color: #e8e3d6; text-decoration: none; }
     .authors a:hover { text-decoration: underline; }
-    .affiliation {
-      font-size: 0.9rem;
-      opacity: 0.75;
+    .affiliation,
+    .corresponding {
+      font-size: 0.92rem;
+      line-height: 1.55;
+      opacity: 0.82;
+      margin-bottom: 8px;
+    }
+    .affiliation-list,
+    .corresponding-list {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 8px 14px;
       margin-bottom: 28px;
+    }
+    .affiliation-list span,
+    .corresponding-list span {
+      white-space: nowrap;
+    }
+    .affiliation-list .tag,
+    .corresponding-list .tag {
+      display: inline-block;
+      min-width: 1.35rem;
+      text-align: center;
+      padding: 0 0.35rem;
+      margin-right: 0.35rem;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.22);
+      font-size: 0.78rem;
+      font-weight: 700;
+      line-height: 1.35;
     }
     .header-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
     .btn {
@@ -114,7 +147,7 @@
       margin-top: 20px;
     }
     .key-props li {
-      background: #f5f8ff;
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 14px 16px;
@@ -171,19 +204,19 @@
       text-align: center;
       border: 1px solid rgba(255,255,255,0.2);
     }
-    thead tr.subhead { background: #3d6ec2; }
-    thead tr.metric  { background: #4d7ed2; }
-    tbody tr:nth-child(odd)  { background: #fafbfd; }
-    tbody tr:nth-child(even) { background: #fff; }
-    tbody tr.ours { background: #eef3ff !important; font-weight: 700; }
-    tbody tr:hover { background: #e5ecfb !important; }
+    thead tr.subhead { background: var(--accent-dark); }
+    thead tr.metric  { background: var(--accent-deep); }
+    tbody tr:nth-child(odd)  { background: #fbf9f3; }
+    tbody tr:nth-child(even) { background: #f7f3e8; }
+    tbody tr.ours { background: #e8f4df !important; font-weight: 700; }
+    tbody tr:hover { background: #ddeecf !important; }
     tbody td {
       padding: 9px 12px;
       text-align: center;
       border: 1px solid var(--border);
     }
     tbody td:first-child { text-align: left; font-weight: 500; padding-left: 14px; }
-    .best  { font-weight: 800; color: #1a3a6e; }
+    .best  { font-weight: 800; color: #2f6f23; }
     .second { text-decoration: underline; }
     .table-caption {
       font-size: 0.88rem;
@@ -200,7 +233,7 @@
       margin-top: 16px;
     }
     .detail-card {
-      background: #f5f8ff;
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 14px 16px;
@@ -269,7 +302,7 @@
     .demo-ctrl-group select {
       appearance: none;
       -webkit-appearance: none;
-      background: #f5f8ff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%232b5caa' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 10px center;
+      background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%235ebd3a' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 10px center;
       border: 1.5px solid var(--border);
       border-radius: 8px;
       padding: 8px 32px 8px 12px;
@@ -292,7 +325,7 @@
       .demo-images { grid-template-columns: 1fr; }
     }
     .demo-card {
-      background: #f5f8ff;
+      background: var(--surface);
       border: 1.5px solid var(--border);
       border-radius: 12px;
       overflow: hidden;
@@ -308,14 +341,14 @@
       text-align: center;
       letter-spacing: 0.03em;
     }
-    .demo-card-header.saeuron  { background: #5a7ec2; }
-    .demo-card-header.saemnesia { background: #1a3a6e; }
+    .demo-card-header.saeuron  { background: #5f8f4f; }
+    .demo-card-header.saemnesia { background: #2f6f23; }
     .demo-card img {
       width: 100%;
       aspect-ratio: 1;
       object-fit: cover;
       display: block;
-      background: #dde3ed;
+      background: var(--border);
     }
     .demo-card-footer {
       padding: 8px 12px;
@@ -360,21 +393,39 @@
   <h1>SAEmnesia: Supervised Sparse Autoencoder Finetuning for Concept Unlearning in Diffusion Models</h1>
 
   <p class="authors">
-    <a href="https://scholar.google.com/citations?user=GmFkC7cAAAAJ&hl=it&authuser=1" target="_blank">Enrico Cassano</a>&nbsp;&nbsp;
-    <a href="https://scholar.google.com/citations?user=JlAby_oAAAAJ&hl=it&authuser=1" target="_blank">Riccardo Renzulli</a>&nbsp;&nbsp;
-    <a href="https://scholar.google.com/citations?user=vAaWpu8AAAAJ&hl=it&authuser=1" target="_blank">Marco Nurisso</a>&nbsp;&nbsp;
-    <a href="https://scholar.google.com/citations?user=hhRQBCYAAAAJ&hl=it&authuser=1" target="_blank">Mirko Zaffaroni</a>&nbsp;&nbsp;
-    <a href="https://scholar.google.com/citations?user=Aef-vmEAAAAJ&hl=it&authuser=1" target="_blank">Alan Perotti</a>&nbsp;&nbsp;
-    <a href="https://scholar.google.com/citations?user=Pt1gmQYAAAAJ&hl=it&authuser=1" target="_blank">Marco Grangetto</a>
+    <a href="https://scholar.google.com/citations?user=GmFkC7cAAAAJ&hl=it&authuser=1" target="_blank">Enrico Cassano</a><sup>*,1</sup>&nbsp;&nbsp;
+    <a href="https://scholar.google.com/citations?user=JlAby_oAAAAJ&hl=it&authuser=1" target="_blank">Riccardo Renzulli</a><sup>*,1</sup>&nbsp;&nbsp;
+    <a href="https://scholar.google.com/citations?user=vAaWpu8AAAAJ&hl=it&authuser=1" target="_blank">Marco Nurisso</a><sup>2</sup>&nbsp;&nbsp;
+    <a href="https://scholar.google.com/citations?user=hhRQBCYAAAAJ&hl=it&authuser=1" target="_blank">Mirko Zaffaroni</a><sup>3</sup>&nbsp;&nbsp;
+    <a href="https://scholar.google.com/citations?user=Aef-vmEAAAAJ&hl=it&authuser=1" target="_blank">Alan Perotti</a><sup>3</sup>&nbsp;&nbsp;
+    <a href="https://scholar.google.com/citations?user=Pt1gmQYAAAAJ&hl=it&authuser=1" target="_blank">Marco Grangetto</a><sup>1</sup>
   </p>
+
+  <div class="affiliation-list">
+    <span><span class="tag">1</span>University of Turin, Italy</span>
+    <span><span class="tag">2</span>Politecnico di Torino, Italy</span>
+    <span><span class="tag">3</span>Intesa Sanpaolo AI Research, Italy</span>
+  </div>
+
+  <div class="corresponding">
+    <div class="corresponding-list">
+      <span><span class="tag">*</span>Equal contribution:</span>
+      <span><a href="mailto:enrico.cassano@unito.it">enrico.cassano@unito.it</a></span>
+      <span><a href="mailto:riccardo.renzulli@unito.it">riccardo.renzulli@unito.it</a></span>
+    </div>
+  </div>
 
   <div class="header-links">
     <!-- TODO: replace hrefs with real links once available -->
-    <a class="btn" href="https://arxiv.org/abs/XXXX.XXXXX" target="_blank">
+    <a class="btn" href="https://arxiv.org/abs/2509.21379" target="_blank">
       <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm1 7V3.5L18.5 9H15zm-1 2h3v2h-3v2h3v2h-3v2H8v-2h3v-2H8v-2h3v-2H8V9h6v2z"/></svg>
       Paper
     </a>
-    <a class="btn" href="https://github.com/YOUR_USERNAME/SAEmnesia" target="_blank">
+    <a class="btn" href="#">
+      <svg class="link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+      OpenReview (coming soon)
+    </a>
+    <a class="btn" href="https://github.com/EIDOSLAB/SAEmnesia" target="_blank">
       <svg viewBox="0 0 24 24"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.419 2.865 8.166 6.839 9.489.5.09.682-.218.682-.484 0-.236-.009-.866-.013-1.699-2.782.602-3.369-1.34-3.369-1.34-.455-1.157-1.11-1.465-1.11-1.465-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.891 1.529 2.341 1.089 2.91.833.091-.647.349-1.086.635-1.337-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.269 2.75 1.025A9.56 9.56 0 0 1 12 6.836a9.59 9.59 0 0 1 2.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.378.203 2.394.1 2.647.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.942.359.307.678.917.678 1.852 0 1.335-.012 2.415-.012 2.741 0 .269.18.579.688.481C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
       Code
     </a>
@@ -392,15 +443,14 @@
   <section id="abstract">
     <h2>Abstract</h2>
     <div class="abstract-box">
-      SAEmnesia fine-tunes a pre-trained Sparse Autoencoder (SAE) with a supervised cross-entropy objective that assigns dedicated latent neurons to specific concepts. At inference time, suppressing those neurons selectively erases the target concept from the diffusion model's generation, <strong>without retraining the diffusion model itself</strong>.
-      Standard SAE-based unlearning (e.g., SAeUron) relies on unsupervised latent features that may be entangled with multiple concepts. SAEmnesia supervises the SAE with a concept-assignment loss during finetuning, enforcing that a dedicated set of latent neurons fires exclusively for the concept to be erased. At inference time, steering those neurons toward zero suppresses the concept cleanly.
+      Concept unlearning in diffusion models is hampered by feature splitting, where concepts are distributed across many latent features, making their removal challenging and computationally expensive. We introduce <b>SAEmnesia</b>, a <b>supervised sparse autoencoder</b> framework that overcomes this by enforcing <b>one-to-one concept-neuron mappings</b>. By systematically labeling concepts during training, our method achieves feature centralization, binding each concept to a single, interpretable neuron. This enables highly targeted and efficient concept erasure. Compared to the state-of-the-art sparse autoencoder-based unlearning approach, SAEmnesia reduces hyperparameter search by 96.67% and achieves a 9.22% improvement on the UnlearnCanvas benchmark for objects. Our method also shows superior scalability in sequential unlearning, improving accuracy by 28.4% when removing nine objects, establishing a step forward for precise and controllable concept erasure. Moreover, SAEmnesia effectively suppresses nudity on the I2P benchmark and remains robust to adversarial attacks.
     </div>
 
     <ul class="key-props">
       <li>No diffusion model retraining — only the SAE weights are updated</li>
       <li>Concept-specific latent assignment via cross-entropy supervision</li>
-      <li>Evaluated on the UnlearnCanvas benchmark (objects &amp; styles)</li>
-      <li>Robustness tested against adversarial re-learning attacks</li>
+      <li>Evaluated on the UnlearnCanvas and I2P benchmarks</li>
+      <li>Robustness tested against adversarial attacks</li>
     </ul>
   </section>
 
@@ -408,13 +458,13 @@
   <section id="overview">
     <h2>Overview</h2>
     <figure class="figure">
-      <img src="teaser_saemnesia_cvpr-1.png" alt="SAEmnesia Teaser"/>
+      <img src="teaser_saemnesia.png" alt="SAEmnesia Teaser"/>
       <figcaption>Figure 1 — SAEmnesia concept unlearning in diffusion models. Suppressing dedicated SAE neurons at inference selectively erases a target concept without any diffusion model retraining.</figcaption>
     </figure>
 
     <figure class="figure">
-      <img src="pipeline_saemnesia-1.png" alt="SAEmnesia Pipeline"/>
-      <figcaption>Figure 2 — Full pipeline: supervised SAE finetuning assigns concept-specific neurons; at inference, those neurons are steered toward zero to erase the concept.</figcaption>
+      <img src="pipeline_saemnesia.png" alt="SAEmnesia Pipeline"/>
+      <figcaption>Figure 2 — Full pipeline: supervised SAE finetuning assigns concept-specific neurons; at inference, those neurons are steered with negative multipliers to erase the concept.</figcaption>
     </figure>
   </section>
 
@@ -602,7 +652,8 @@
     <p class="table-caption">Table 1 — UA: Unlearning Accuracy (higher = better erasure). IRA: In-Domain Retention Accuracy. CRA: Cross-Domain Retention Accuracy. FID measures image quality. Memory and Storage reflect inference overhead.</p>
   </section>
 
-  <!-- INTERACTIVE DEMO -->
+  <!--
+  INTERACTIVE DEMO
   <section id="demo">
     <h2>Interactive Demo</h2>
     <p>Compare the base diffusion model with SAEuron and SAEmnesia. Select a subject, artistic style, concept to suppress, timestep range, and multiplier strength to explore how each method handles concept unlearning. <strong>Optimal</strong> uses each method's own best-known negative multiplier for the selected concept; other values apply the same multiplier to both for a direct comparison.</p>
@@ -610,7 +661,7 @@
     <div class="demo-controls">
       <div class="demo-ctrl-group">
         <label for="demo-obj">Object to Generate</label>
-        <select id="demo-obj"><!-- populated by JS --></select>
+        <select id="demo-obj"></select>
       </div>
       <div class="demo-ctrl-group">
         <label for="demo-style">Style</label>
@@ -657,9 +708,9 @@
         <label for="demo-mult">Multiplier</label>
         <select id="demo-mult">
           <option value="optimal" selected>Optimal (per method)</option>
-          <option value="m1">−1 (both methods)</option>
-          <option value="m5">−5 (both methods)</option>
-          <option value="m10">−10 (both methods)</option>
+          <option value="m1">-1 (both methods)</option>
+          <option value="m5">-5 (both methods)</option>
+          <option value="m10">-10 (both methods)</option>
         </select>
       </div>
     </div>
@@ -668,7 +719,7 @@
       <div class="demo-card">
         <div class="demo-card-header">Base Model</div>
         <img id="img-base" src="" alt="Base model output" onerror="this.src=demoPlaceholder()"/>
-        <div class="demo-card-footer" id="footer-base">Diffusion model — no SAE intervention</div>
+        <div class="demo-card-footer" id="footer-base">Diffusion model - no SAE intervention</div>
       </div>
       <div class="demo-card">
         <div class="demo-card-header saeuron">SAEuron</div>
@@ -678,11 +729,12 @@
       <div class="demo-card">
         <div class="demo-card-header saemnesia">SAEmnesia (ours)</div>
         <img id="img-saemnesia" src="" alt="SAEmnesia output" onerror="this.src=demoPlaceholder()"/>
-        <div class="demo-card-footer" id="footer-saemnesia">Supervised SAE finetuning — precise concept removal</div>
+        <div class="demo-card-footer" id="footer-saemnesia">Supervised SAE finetuning - precise concept removal</div>
       </div>
     </div>
     <div class="demo-status" id="demo-status"></div>
   </section>
+  -->
 
   <!-- TRAINING DETAILS -->
   <section id="training-details">
@@ -711,12 +763,10 @@
     <h2>Citation</h2>
     <p>If you find SAEmnesia useful in your research, please cite:</p>
     <div class="bibtex-box">
-      <pre><code id="bibtex">@inproceedings{saemnesia2026,
-  title     = {SAEmnesia: Supervised Sparse Autoencoder Finetuning
-               for Concept Unlearning in Diffusion Models},
-  author    = {Author One and Author Two and Author Three},
-  booktitle = {Proceedings of the 43rd International Conference on
-               Machine Learning (ICML)},
+      <pre><code id="bibtex">@inproceedings{cassano2026saemnesia,
+  title     = {{SAE}mnesia: Erasing Concepts in Diffusion Models with Supervised Sparse Autoencoders},
+  author    = {Enrico Cassano and Riccardo Renzulli and Marco Nurisso and Mirko Zaffaroni and Alan Perotti and Marco Grangetto},
+  booktitle = {Forty-third International Conference on Machine Learning},
   year      = {2026},
 }</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
     </div>
@@ -741,8 +791,8 @@ function copyCode(btn) {
   });
 }
 
-// ── Interactive Demo ──────────────────────────────────────────────────────────
-
+// Interactive demo is temporarily commented out.
+/*
 // Per-concept optimal multipliers (must match generate_demo_images.py)
 const OPTIMAL_SAEMNESIA = {
   architectures:-5,  bears:-20, birds:-5,  butterfly:-5,
@@ -797,7 +847,7 @@ function populateObjDropdown(unlearn) {
 }
 
 function demoPlaceholder() {
-  return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Crect width='512' height='512' fill='%23dde3ed'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='22' fill='%23888'%3ENot available%3C/text%3E%3C/svg%3E";
+  return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Crect width='512' height='512' fill='%23d4cdc0'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='22' fill='%2355514a'%3ENot available%3C/text%3E%3C/svg%3E";
 }
 
 function updateDemo() {
@@ -835,10 +885,10 @@ function updateDemo() {
   }
 
   const unlLabel  = unlearn === 'none' ? 'none' : unlearn;
-  const tsLabel   = ts === 'tfull' ? 'full run' : 'steps 25→0';
+  const tsLabel   = ts === 'tfull' ? 'full run' : 'steps 25->0';
   const multLabel = mult === 'optimal'
     ? `optimal (SAEuron ${saeuronMult ?? ''} / SAEmnesia ${saemnMult ?? ''})`
-    : mult.replace('m', '−');
+    : mult.replace('m', '-');
   status.textContent =
     `Prompt: "An image of ${DISPLAY_NAME[obj] ?? obj} in ${style} style."  ·  `
     + `Unlearn: ${unlLabel}  ·  Timestep: ${tsLabel}  ·  Multiplier: ${multLabel}`;
@@ -859,6 +909,7 @@ document.querySelectorAll('#demo select:not(#demo-unlearn)').forEach(sel =>
 // Initialise object dropdown then render
 populateObjDropdown(document.getElementById('demo-unlearn').value);
 updateDemo();
+*/
 </script>
 
 </body>
